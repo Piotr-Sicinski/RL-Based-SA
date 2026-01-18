@@ -90,8 +90,10 @@ def main(cfg: NeuralSAExperiment) -> None:
         problem = Knapsack(
             cfg.problem_dim, cfg.n_problems, device=cfg.device, params={"capacity": cfg.capacity}
         )
-        actor = KnapsackActor(cfg.embed_dim, device=cfg.device)
-        critic = KnapsackCritic(cfg.embed_dim, device=cfg.device)
+        params = problem.generate_params()
+        problem.set_params(**params)
+        actor = KnapsackActor(problem, cfg.embed_dim, device=cfg.device)
+        critic = KnapsackCritic(problem, cfg.embed_dim, device=cfg.device)
     elif cfg.problem == "binpacking":
         problem = BinPacking(cfg.problem_dim, cfg.n_problems, device=cfg.device)
         actor = BinPackingActor(cfg.embed_dim, device=cfg.device)
@@ -102,6 +104,9 @@ def main(cfg: NeuralSAExperiment) -> None:
         critic = TSPCritic(cfg.embed_dim, device=cfg.device)
     else:
         raise ValueError("Invalid problem name.")
+
+    actor = actor.to(cfg.device)
+    critic = critic.to(cfg.device)
 
     # Set problem seed
     problem.manual_seed(cfg.seed)

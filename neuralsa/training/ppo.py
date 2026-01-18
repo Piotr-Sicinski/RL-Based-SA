@@ -59,9 +59,9 @@ def ppo(
         nt = len(transitions)
         # Gather transition information into tensors
         batch = Transition(*zip(*transitions))
-        state = torch.stack(batch.state).view(nt * n_problems, problem_dim, -1)
+        state = torch.stack(batch.state).view(nt * n_problems, -1).to(device)
         action = torch.stack(batch.action).detach().view(nt * n_problems, -1)
-        next_state = torch.stack(batch.next_state).detach().view(nt * n_problems, problem_dim, -1)
+        next_state = torch.stack(batch.next_state).detach().view(nt * n_problems, -1).to(device)
         old_log_probs = torch.stack(batch.old_log_probs).view(nt * n_problems, -1)
         # Evaluate the critic
         state_values = critic(state).view(nt, n_problems, 1)

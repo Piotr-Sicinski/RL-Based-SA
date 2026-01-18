@@ -39,119 +39,131 @@ class SAModel(nn.Module):
                 m.bias.data.fill_(0.01)
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple
+
 class KnapsackActor(SAModel):
-    def __init__(self, embed_dim: int, device: str) -> None:
-        super().__init__(device)
-        self.state_dim = 5
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        self.device = device
+        self.problem = problem
+        self.embed_dim = embed_dim
 
-        # Mean and std computation
-        self.embed = nn.Sequential(
-            nn.Linear(self.state_dim, embed_dim, bias=True, device=device),
-            nn.ReLU(),
-            nn.Linear(embed_dim, 1, bias=True, device=device),
-        )
+        # dynamic state_dim
+        self.state_dim = problem.x_dim + problem.state_encoding.shape[-1] + 1  # x + encoding + temp
 
-        self.embed.apply(self.init_weights)
+        # Input projection before LSTM
+        self.input_proj = nn.Linear(self.state_dim, embed_dim, device=device)
+        # LSTM
+        self.lstm = nn.LSTM(embed_dim, embed_dim, batch_first=True, device=device)
+        # Output layer
+        self.output_layer = nn.Linear(embed_dim, problem.x_dim, device=device)
 
-    def get_logits(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        # Neural net
-        return self.embed(state)[..., 0]
+        self.init_weights()
 
-    def sample_from_logits(
-        self, logits: torch.Tensor, mask: torch.Tensor = None, greedy: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        n_problems, problem_dim = logits.shape
-        if mask is not None:
-            logits = logits + mask
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.xavier_uniform_(self.output_layer.weight)
+        if self.input_proj.bias is not None:
+            self.input_proj.bias.data.fill_(0.01)
+        if self.output_layer.bias is not None:
+            self.output_layer.bias.data.fill_(0.01)
 
-        probs = torch.softmax(logits, dim=-1)
-        if greedy:
-            smpl = torch.argmax(probs, -1, keepdim=False)
-        else:
-            smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
+    def forward(
+        self, state: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        state: [batch, state_dim]
+        hidden: LSTM hidden state (h, c)
+        returns: logits [batch, x_dim], hidden
+        """
+        x = self.input_proj(state)  # [batch, embed_dim]
+        x = x.unsqueeze(1)  # add seq_len=1: [batch, 1, embed_dim]
 
-        action = F.one_hot(smpl, num_classes=problem_dim)
-        return action[..., None], torch.log(probs[action.bool()])
+        if hidden is None:
+            batch_size = state.shape[0]
+            h0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
+            c0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
+            hidden = (h0, c0)
 
-    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Convert state -> x
-        n_problems, problem_dim, _ = state.shape
-        x = state[..., 0]
-        weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
-
-        # Compute mask to avoid exceeding the knapsack's capacity by selecting too heavy items
-        total_weight = torch.sum(weights * x, -1)
-        free_space = capacity - extend_to(total_weight, capacity)
-        oversized = (weights > free_space) * (x == 0)
-        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
-
-        logits = torch.ones((state.shape[0], problem_dim), device=state.device)
-        return self.sample_from_logits(logits, mask=mask)
+        out, hidden = self.lstm(x, hidden)  # out: [batch, 1, embed_dim]
+        out = out.squeeze(1)  # [batch, embed_dim]
+        logits = self.output_layer(out)  # [batch, x_dim]
+        return logits, hidden
 
     def sample(
-        self, state: torch.Tensor, greedy: bool = False, **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Convert state -> x
-        n_problems, problem_dim, _ = state.shape
-        x = state[..., 0]
-        weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        self,
+        state: torch.Tensor,
+        hidden: Tuple[torch.Tensor, torch.Tensor] = None,
+        greedy: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        logits, hidden = self.forward(state, hidden)
+        probs = torch.softmax(logits, dim=-1)
 
-        # Compute mask to avoid exceeding the knapsack's capacity
-        # by selecting too heavy items
-        total_weight = torch.sum(weights * x, -1)
-        free_space = capacity - extend_to(total_weight, capacity)
-        oversized = (weights > free_space) * (x == 0)
-        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        if greedy:
+            smpl = torch.argmax(probs, dim=-1)
+        else:
+            smpl = torch.multinomial(probs, 1)[..., 0]
 
-        # Compute logits and sample an action
-        logits = self.embed(state)[..., 0]
-        return self.sample_from_logits(logits, mask=mask, greedy=greedy)
+        action = F.one_hot(smpl, num_classes=self.problem.x_dim).float()
+        log_probs = torch.log(probs[action.bool()])
 
-    def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
-        # Convert state -> x
-        n_problems, problem_dim, _ = state.shape
-        x = state[..., 0]
-        weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        return action, log_probs, hidden
 
-        # Compute mask to avoid exceeding the knapsack's capacity
-        # by selecting too heavy items
-        total_weight = torch.sum(weights * x, -1)
-        free_space = capacity - extend_to(total_weight, capacity)
-        oversized = (weights > free_space) * (x == 0)
-        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        # uniform random action
+        batch_size = state.shape[0]
+        x_dim = self.problem.x_dim
+        smpl = torch.randint(0, 2, (batch_size, x_dim), device=state.device)
+        log_probs = torch.log(torch.ones_like(smpl, dtype=torch.float) * 0.5)
+        return smpl.float(), log_probs
 
-        # Get logits and compute log-probabilities of the action taken
-        logits = self.embed(state)[..., 0] + mask
-        log_probs = torch.log_softmax(logits, dim=-1)
-        return log_probs[action.bool()]
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, hidden=None):
+        if hidden is not None:
+            logits, hidden = self.forward(state, hidden)
+        else:
+            logits, _ = self.forward(state)
+        
+        m = torch.distributions.Bernoulli(logits=logits)
+        log_probs = m.log_prob(action).sum(-1, keepdim=True)
+        return log_probs
+
 
 
 class KnapsackCritic(nn.Module):
-    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
-        self.state_dim = 5
+        self.device = device
+        self.problem = problem
+        self.state_dim = problem.x_dim + problem.state_encoding.shape[-1] + 1
+        self.embed_dim = embed_dim
 
-        # Mean and std computation
+        # Simple MLP critic
         self.embed = nn.Sequential(
-            nn.Linear(self.state_dim, embed_dim, bias=True, device=device),
+            nn.Linear(self.state_dim, embed_dim, device=device),
             nn.ReLU(),
-            nn.Linear(embed_dim, 1, bias=True, device=device),
+            nn.Linear(embed_dim, 1, device=device),
         )
 
-        self.embed.apply(self.init_weights)
+        self.init_weights()
 
-    @staticmethod
-    def init_weights(m: nn.Module) -> None:
-        if type(m) == nn.Linear:
-            nn.init.xavier_uniform_(m.weight)
-            if m.bias is not None:
-                m.bias.data.fill_(0.01)
+    def init_weights(self):
+        for m in self.embed:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    m.bias.data.fill_(0.01)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.embed(state)[..., 0].mean(-1)
+        """
+        state: [batch, state_dim]
+        returns: value estimate [batch]
+        """
+        return self.embed(state).squeeze(-1)
+
+
 
 
 class BinPackingActor(SAModel):

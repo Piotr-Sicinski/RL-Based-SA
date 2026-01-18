@@ -15,6 +15,10 @@ class Problem(ABC):
         self.device = device
         self.generator = torch.Generator(device=device)
 
+        # ---- RL-Based-SA ----
+        self.prev_cost = None
+        self.curr_cost = None
+
     def gain(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         return self.cost(s) - self.cost(self.update(s, a))
 
@@ -47,10 +51,21 @@ class Problem(ABC):
         pass
 
     def to_state(self, x: torch.Tensor, temp: torch.Tensor):
-        return torch.cat([x, self.state_encoding, repeat_to(temp, x)], -1)
+        x_flat = x.view(x.size(0), -1)
+        temp_flat = repeat_to(temp, x_flat)
+        return torch.cat([x_flat, self.state_encoding, temp_flat], dim=-1)
+
 
     def from_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return state[..., : self.x_dim], state[..., self.x_dim : -1], state[..., -1:]
+        x = state[..., : self.x_dim]
+        
+        spec = state[..., self.x_dim : -1]
+        
+        temp = state[..., -1:]
+        return x, spec, temp
+
+
+
 
 
 class Rosenbrock(Problem):
@@ -111,21 +126,16 @@ class Rosenbrock(Problem):
 
 
 class Knapsack(Problem):
-    x_dim = 1
+    x_dim = None
 
-    def __init__(
-        self,
-        dim: int = 50,
-        n_problems: int = 256,
-        device: str = "cpu",
-        params: Dict[str, torch.Tensor] = {},
-    ) -> None:
-        """Weights, values and states: 2D [batch size, num_items]"""
+    def __init__(self, dim: int = 50, n_problems: int = 256, device: str = "cpu", params: Dict = {}):
         super().__init__(device)
         self.dim = dim
         self.n_problems = n_problems
-        params["capacity"] = params["capacity"] * torch.ones((self.n_problems, 1))
+        self.x_dim = dim
+        params["capacity"] = params["capacity"] * torch.ones((self.n_problems, 1), device=device)
         self.set_params(**params)
+
 
     def set_params(
         self,
@@ -159,28 +169,40 @@ class Knapsack(Problem):
     def state_encoding(self) -> torch.Tensor:
         """
         Returns:
-            [batch_size, dim, 2] tensor
+            [batch, dim * 3] tensor
         """
-        ones = torch.ones((self.dim,), device=self.device)
-        capacity = self.capacity * ones / self.dim
-        return torch.stack([self.weights, self.values, capacity], -1)
+        # weights, values: [batch, dim], capacity: [batch, 1] -> repeat do dim
+        cap_norm = self.capacity / self.dim  # [batch, 1]
+        cap_norm = cap_norm.repeat(1, self.dim)  # [batch, dim]
+
+        # concatenate along last dim
+        return torch.cat([self.weights, self.values, cap_norm], dim=-1) 
 
     def generate_init_x(self) -> torch.Tensor:
-        x = torch.zeros((self.n_problems, self.dim, 1), device=self.device)
-        return x
+        # [batch, dim]
+        return torch.zeros((self.n_problems, self.dim), device=self.device)
 
     def generate_init_state(self) -> torch.Tensor:
+        # concat x + state_encoding + temp will be done w to_state()
         x = self.generate_init_x()
-        return torch.cat([x, self.state_encoding], -1)
+        return x
 
     def cost(self, s: torch.Tensor) -> torch.Tensor:
-        v = torch.sum(self.values * s[..., 0], -1)
-        w = torch.sum(self.weights * s[..., 0], -1)
-        return -v * (w < self.capacity[..., 0])
+        # s: [batch, dim], binary solution
+        v = torch.sum(self.values * s, dim=-1)
+        w = torch.sum(self.weights * s, dim=-1)
+        # penalize overweight solutions
+        penalty = (w > self.capacity.squeeze(-1)).float() * 1e6
+        return -(v - penalty)  # negative because SA minimizes energy
 
     def update(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """Computes XOR function (N.B. bitwise ops don't work on floats)"""
+        """
+        Apply XOR with action to flip bits.
+        s: current solution [batch, dim]
+        a: action [batch, dim]
+        """
         return ((s > 0.5) ^ (a > 0.5)).float()
+
 
 
 class BinPacking(Problem):
