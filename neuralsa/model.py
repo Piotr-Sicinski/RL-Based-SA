@@ -46,20 +46,21 @@ from typing import Tuple
 
 class KnapsackActor(SAModel):
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
-        super().__init__()
-        self.device = device
+        super().__init__(device)
         self.problem = problem
         self.embed_dim = embed_dim
 
-        # dynamic state_dim
-        self.state_dim = problem.x_dim + problem.state_encoding.shape[-1] + 1  # x + encoding + temp
+        # State features per item: x(1) + weights(1) + values(1) + capacity(1) + temp(1) + delta_e(1)
+        # We'll use 5 initially (no delta_e), and handle 6 if delta_e is added
+        self.state_dim_min = 5  # x + weight + value + capacity + temp
+        self.state_dim_max = 6  # + delta_e
 
         # Input projection before LSTM
-        self.input_proj = nn.Linear(self.state_dim, embed_dim, device=device)
-        # LSTM
+        self.input_proj = nn.Linear(self.state_dim_max, embed_dim, device=device)
+        # LSTM processes sequence of items
         self.lstm = nn.LSTM(embed_dim, embed_dim, batch_first=True, device=device)
-        # Output layer
-        self.output_layer = nn.Linear(embed_dim, problem.x_dim, device=device)
+        # Output layer produces logit per item
+        self.output_layer = nn.Linear(embed_dim, 1, device=device)
 
         self.init_weights()
 
@@ -75,22 +76,27 @@ class KnapsackActor(SAModel):
         self, state: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        state: [batch, state_dim]
+        state: [batch, problem_dim, features] where features = 5 or 6
         hidden: LSTM hidden state (h, c)
-        returns: logits [batch, x_dim], hidden
+        returns: logits [batch, problem_dim], hidden
         """
-        x = self.input_proj(state)  # [batch, embed_dim]
-        x = x.unsqueeze(1)  # add seq_len=1: [batch, 1, embed_dim]
+        batch_size, seq_len, features = state.shape
+        
+        # Pad to max features if necessary
+        if features < self.state_dim_max:
+            padding = torch.zeros(batch_size, seq_len, self.state_dim_max - features, 
+                                 device=state.device, dtype=state.dtype)
+            state = torch.cat([state, padding], dim=-1)
+        
+        x = self.input_proj(state)  # [batch, problem_dim, embed_dim]
 
         if hidden is None:
-            batch_size = state.shape[0]
             h0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
             c0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
             hidden = (h0, c0)
 
-        out, hidden = self.lstm(x, hidden)  # out: [batch, 1, embed_dim]
-        out = out.squeeze(1)  # [batch, embed_dim]
-        logits = self.output_layer(out)  # [batch, x_dim]
+        out, hidden = self.lstm(x, hidden)  # out: [batch, problem_dim, embed_dim]
+        logits = self.output_layer(out).squeeze(-1)  # [batch, problem_dim]
         return logits, hidden
 
     def sample(
@@ -105,30 +111,31 @@ class KnapsackActor(SAModel):
         if greedy:
             smpl = torch.argmax(probs, dim=-1)
         else:
-            smpl = torch.multinomial(probs, 1)[..., 0]
+            smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
 
-        action = F.one_hot(smpl, num_classes=self.problem.x_dim).float()
+        action = F.one_hot(smpl, num_classes=self.problem.dim).float()
         log_probs = torch.log(probs[action.bool()])
 
         return action, log_probs, hidden
 
     def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        # uniform random action
+        # uniform random action - sample one item to flip
         batch_size = state.shape[0]
-        x_dim = self.problem.x_dim
-        smpl = torch.randint(0, 2, (batch_size, x_dim), device=state.device)
-        log_probs = torch.log(torch.ones_like(smpl, dtype=torch.float) * 0.5)
-        return smpl.float(), log_probs
+        problem_dim = self.problem.dim
+        smpl = torch.randint(0, problem_dim, (batch_size,), device=state.device, generator=self.generator)
+        action = F.one_hot(smpl, num_classes=problem_dim).float()
+        log_probs = torch.log(torch.ones(batch_size, device=state.device) / problem_dim)
+        return action, log_probs
 
     def evaluate(self, state: torch.Tensor, action: torch.Tensor, hidden=None):
-        if hidden is not None:
-            logits, hidden = self.forward(state, hidden)
-        else:
-            logits, _ = self.forward(state)
-        
-        m = torch.distributions.Bernoulli(logits=logits)
-        log_probs = m.log_prob(action).sum(-1, keepdim=True)
-        return log_probs
+        """
+        state: [batch, problem_dim, features]
+        action: [batch, problem_dim] one-hot encoded
+        """
+        logits, _ = self.forward(state, hidden)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        # Get log prob of the selected action
+        return log_probs[action.bool()]
 
 
 
@@ -137,12 +144,12 @@ class KnapsackCritic(nn.Module):
         super().__init__()
         self.device = device
         self.problem = problem
-        self.state_dim = problem.x_dim + problem.state_encoding.shape[-1] + 1
+        self.state_dim_max = 6  # Match actor: x + weight + value + capacity + temp + delta_e
         self.embed_dim = embed_dim
 
-        # Simple MLP critic
+        # MLP critic processes per-item features
         self.embed = nn.Sequential(
-            nn.Linear(self.state_dim, embed_dim, device=device),
+            nn.Linear(self.state_dim_max, embed_dim, device=device),
             nn.ReLU(),
             nn.Linear(embed_dim, 1, device=device),
         )
@@ -158,10 +165,20 @@ class KnapsackCritic(nn.Module):
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """
-        state: [batch, state_dim]
+        state: [batch, problem_dim, features] where features = 5 or 6
         returns: value estimate [batch]
         """
-        return self.embed(state).squeeze(-1)
+        batch_size, seq_len, features = state.shape
+        
+        # Pad to max features if necessary
+        if features < self.state_dim_max:
+            padding = torch.zeros(batch_size, seq_len, self.state_dim_max - features, 
+                                 device=state.device, dtype=state.dtype)
+            state = torch.cat([state, padding], dim=-1)
+        
+        # Process each item and aggregate
+        values = self.embed(state)  # [batch, problem_dim, 1]
+        return values.mean(dim=1).squeeze(-1)  # [batch]
 
 
 
@@ -397,7 +414,8 @@ class BinPackingCritic(nn.Module):
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         batch_size, problem_dim, _ = state.shape
-        q_values = self.q_func(state[..., 1:]).view(batch_size, problem_dim)
+        # Use features 1-3: weight, free_capacity, temp (skip x at 0, and delta_e at 4 if present)
+        q_values = self.q_func(state[..., 1:4]).view(batch_size, problem_dim)
         return q_values.mean(dim=-1)
 
 
@@ -512,8 +530,12 @@ class TSPActor(SAModel):
     def sample(
         self, state: torch.Tensor, greedy: bool = False, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        n_problems, problem_dim, _ = state.shape
-        x, coords, temp = state[..., :1], state[..., 1:-1], state[..., [-1]]
+        n_problems, problem_dim, n_features = state.shape
+        # Extract features: x(1), coords(2), temp(1), [delta_e(1)]
+        x = state[..., :1]
+        coords = state[..., 1:3]  # Always indices 1 and 2
+        temp = state[..., [3]]  # Always index 3
+        # delta_e at index 4 if present (ignored)
 
         # First city encoding
         coords = coords.gather(1, x.long().expand_as(coords))
@@ -552,8 +574,12 @@ class TSPActor(SAModel):
         return action, log_probs[..., 0]
 
     def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
-        n_problems, problem_dim, _ = state.shape
-        x, coords, temp = state[..., :1], state[..., 1:-1], state[..., [-1]]
+        n_problems, problem_dim, n_features = state.shape
+        # Extract features: x(1), coords(2), temp(1), [delta_e(1)]
+        x = state[..., :1]
+        coords = state[..., 1:3]  # Always indices 1 and 2
+        temp = state[..., [3]]  # Always index 3
+        # delta_e at index 4 if present (ignored)
 
         c1 = action[:, 0]
         c2 = action[:, 1]
@@ -615,8 +641,13 @@ class TSPCritic(nn.Module):
                 m.bias.data.fill_(0.01)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        n_problems, problem_dim, _ = state.shape
-        x, coords, temp = state[..., :1], state[..., 1:-1], state[..., [-1]]
+        n_problems, problem_dim, n_features = state.shape
+        # Extract features: x(1), coords(2), temp(1), [delta_e(1)]
+        x = state[..., :1]
+        coords = state[..., 1:3]  # Always indices 1 and 2
+        temp = state[..., [3]]  # Always index 3
+        # delta_e at index 4 if present (ignored)
+        
         # state encoding
         coords = coords.gather(1, x.long().expand_as(coords))
         coords_prev = torch.roll(coords, 1, 1)

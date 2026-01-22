@@ -35,12 +35,6 @@ def sa(
 
     device = init_x.device
 
-    # ============================================================
-    # RESET ENERGII (KLUCZOWE DLA RL-BASED SA)
-    # ============================================================
-    problem.prev_cost = None
-    problem.curr_cost = None
-
     # === Init SA cfg ===
     temp = torch.tensor([cfg.sa.init_temp], device=device)
     next_temp = temp
@@ -58,8 +52,12 @@ def sa(
     costs = [min_cost]
     reward = None
 
-    # === Initial state ===
-    state = problem.to_state(x, temp).to(device)
+    # === Initial ΔE (energy change from previous step) ===
+    # Start with zero since there's no previous step
+    delta_e = torch.zeros((init_x.shape[0], 1), device=device)
+
+    # === Initial state (with ΔE) ===
+    state = problem.to_state(x, temp, delta_e).to(device)
     next_state = state
 
     # ============================================================
@@ -117,6 +115,10 @@ def sa(
             # ----------------------------------------------------
             proposal_cost = problem.cost(proposal)
             gain = cost - proposal_cost   # = -ΔE
+            
+            # Compute ΔE for next state: E(proposal) - E(current)
+            # This is what RL-Based SA adds to the state
+            current_delta_e = (proposal_cost - cost).unsqueeze(-1)
 
             # ----------------------------------------------------
             # Metropolis acceptance
@@ -160,9 +162,12 @@ def sa(
                 next_temp = temp
 
             # ----------------------------------------------------
-            # Next state
+            # Next state (with ΔE)
             # ----------------------------------------------------
-            next_state = problem.to_state(next_x, next_temp)
+            next_state = problem.to_state(next_x, next_temp, current_delta_e)
+            
+            # Update delta_e for next iteration
+            delta_e = current_delta_e
 
             # ----------------------------------------------------
             # PPO reward

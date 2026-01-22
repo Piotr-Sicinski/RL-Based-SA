@@ -15,10 +15,6 @@ class Problem(ABC):
         self.device = device
         self.generator = torch.Generator(device=device)
 
-        # ---- RL-Based-SA ----
-        self.prev_cost = None
-        self.curr_cost = None
-
     def gain(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         return self.cost(s) - self.cost(self.update(s, a))
 
@@ -50,19 +46,17 @@ class Problem(ABC):
     def generate_init_state(self) -> torch.Tensor:
         pass
 
-    def to_state(self, x: torch.Tensor, temp: torch.Tensor):
-        x_flat = x.view(x.size(0), -1)
-        temp_flat = repeat_to(temp, x_flat)
-        return torch.cat([x_flat, self.state_encoding, temp_flat], dim=-1)
-
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None):
+        """Construct state with optional ΔE (energy change from previous step)"""
+        # Keep per-item structure: [batch, dim, features]
+        state = torch.cat([x, self.state_encoding, repeat_to(temp, x)], -1)
+        if delta_e is not None:
+            state = torch.cat([state, repeat_to(delta_e, x)], -1)
+        return state
 
     def from_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = state[..., : self.x_dim]
-        
-        spec = state[..., self.x_dim : -1]
-        
-        temp = state[..., -1:]
-        return x, spec, temp
+        """Extract x, spec, temp from state (ignoring ΔE if present)"""
+        return state[..., : self.x_dim], state[..., self.x_dim : -1], state[..., -1:]
 
 
 
@@ -126,16 +120,14 @@ class Rosenbrock(Problem):
 
 
 class Knapsack(Problem):
-    x_dim = None
+    x_dim = 1  # Per-item dimension
 
     def __init__(self, dim: int = 50, n_problems: int = 256, device: str = "cpu", params: Dict = {}):
         super().__init__(device)
         self.dim = dim
         self.n_problems = n_problems
-        self.x_dim = dim
         params["capacity"] = params["capacity"] * torch.ones((self.n_problems, 1), device=device)
         self.set_params(**params)
-
 
     def set_params(
         self,
@@ -169,39 +161,39 @@ class Knapsack(Problem):
     def state_encoding(self) -> torch.Tensor:
         """
         Returns:
-            [batch, dim * 3] tensor
+            [batch, dim, 3] tensor with per-item (weight, value, capacity)
         """
-        # weights, values: [batch, dim], capacity: [batch, 1] -> repeat do dim
-        cap_norm = self.capacity / self.dim  # [batch, 1]
-        cap_norm = cap_norm.repeat(1, self.dim)  # [batch, dim]
-
-        # concatenate along last dim
-        return torch.cat([self.weights, self.values, cap_norm], dim=-1) 
+        ones = torch.ones((self.dim,), device=self.device)
+        capacity = self.capacity * ones / self.dim  # [batch, dim]
+        # Stack along last dimension to get [batch, dim, 3]
+        return torch.stack([self.weights, self.values, capacity], -1)
 
     def generate_init_x(self) -> torch.Tensor:
-        # [batch, dim]
-        return torch.zeros((self.n_problems, self.dim), device=self.device)
+        # [batch, dim, 1] - per-item structure
+        return torch.zeros((self.n_problems, self.dim, 1), device=self.device)
 
     def generate_init_state(self) -> torch.Tensor:
-        # concat x + state_encoding + temp will be done w to_state()
         x = self.generate_init_x()
-        return x
+        return torch.cat([x, self.state_encoding], -1)
 
     def cost(self, s: torch.Tensor) -> torch.Tensor:
-        # s: [batch, dim], binary solution
-        v = torch.sum(self.values * s, dim=-1)
-        w = torch.sum(self.weights * s, dim=-1)
+        # s: [batch, dim, 1], binary solution
+        v = torch.sum(self.values * s[..., 0], -1)
+        w = torch.sum(self.weights * s[..., 0], -1)
         # penalize overweight solutions
-        penalty = (w > self.capacity.squeeze(-1)).float() * 1e6
+        penalty = (w > self.capacity[..., 0]).float() * 1e6
         return -(v - penalty)  # negative because SA minimizes energy
 
     def update(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         """
         Apply XOR with action to flip bits.
-        s: current solution [batch, dim]
-        a: action [batch, dim]
+        s: current solution [batch, dim, 1]
+        a: action [batch, dim] one-hot indicating which item to flip
         """
-        return ((s > 0.5) ^ (a > 0.5)).float()
+        # Expand action to match s shape
+        a_expanded = a.unsqueeze(-1)  # [batch, dim, 1]
+        # XOR: flip the bit where action is 1
+        return ((s > 0.5) ^ (a_expanded > 0.5)).float()
 
 
 
@@ -283,7 +275,7 @@ class BinPacking(Problem):
     def state_encoding(self) -> torch.Tensor:
         return self.weights[..., None]
 
-    def to_state(self, x: torch.Tensor, temp: torch.Tensor) -> torch.Tensor:
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None) -> torch.Tensor:
         batch_size, problem_dim, _ = x.shape
         # Get weight of each item
         w = self.weights.unsqueeze(2)
@@ -293,6 +285,8 @@ class BinPacking(Problem):
         # Concatenate all features
         temp = repeat_to(temp, free_capacity)
         state = torch.cat((x, w, free_capacity, temp), dim=-1)
+        if delta_e is not None:
+            state = torch.cat([state, repeat_to(delta_e, x)], -1)
         return state
 
     def generate_init_x(self) -> torch.Tensor:

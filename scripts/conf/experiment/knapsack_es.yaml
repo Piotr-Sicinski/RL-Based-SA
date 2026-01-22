@@ -8,6 +8,5 @@ problem_dim: 50
 embed_dim: 16
 problem: knapsack
 device: cuda:0
-save_path: .
 data_path: datasets
 capacity: 12.5

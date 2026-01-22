@@ -59,9 +59,10 @@ def ppo(
         nt = len(transitions)
         # Gather transition information into tensors
         batch = Transition(*zip(*transitions))
-        state = torch.stack(batch.state).view(nt * n_problems, -1).to(device)
-        action = torch.stack(batch.action).detach().view(nt * n_problems, -1)
-        next_state = torch.stack(batch.next_state).detach().view(nt * n_problems, -1).to(device)
+        # State shape: [nt, n_problems, problem_dim, features] -> [nt*n_problems, problem_dim, features]
+        state = torch.stack(batch.state).reshape(nt * n_problems, problem_dim, -1).to(device)
+        action = torch.stack(batch.action).detach().reshape(nt * n_problems, problem_dim)
+        next_state = torch.stack(batch.next_state).detach().reshape(nt * n_problems, problem_dim, -1).to(device)
         old_log_probs = torch.stack(batch.old_log_probs).view(nt * n_problems, -1)
         # Evaluate the critic
         state_values = critic(state).view(nt, n_problems, 1)
@@ -98,8 +99,8 @@ def ppo(
             perm = np.arange(state.shape[0])
             np.random.shuffle(perm)
             perm = torch.LongTensor(perm).to(device)
-            state = state[perm, :].clone()
-            action = action[perm, :].clone()
+            state = state[perm].clone()
+            action = action[perm].clone()
             rewards_to_go = rewards_to_go[perm, :].clone()
             advantages = advantages[perm, :].clone()
             old_log_probs = old_log_probs[perm, :].clone()
