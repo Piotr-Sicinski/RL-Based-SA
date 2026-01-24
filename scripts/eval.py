@@ -13,8 +13,17 @@ from hydra.core.config_store import ConfigStore
 from hydra.utils import get_original_cwd
 
 from neuralsa.configs import NeuralSAExperiment
-from neuralsa.model import BinPackingActor, KnapsackActor, TSPActor
-from neuralsa.problem import TSP, BinPacking, Knapsack
+from neuralsa.model import (
+    BinPackingActorNSA,
+    BinPackingActorRLBSA,
+    KnapsackActorNSA,
+    KnapsackActorRLBSA,
+    RosenbrockActorNSA,
+    RosenbrockActorRLBSA,
+    TSPActorNSA,
+    TSPActorRLBSA,
+)
+from neuralsa.problem import TSP, BinPacking, Knapsack, Rosenbrock
 from neuralsa.sa import sa
 
 # For reproducibility on GPU
@@ -54,20 +63,56 @@ def main(cfg: NeuralSAExperiment) -> None:
             else:
                 cfg.capacity = cfg.problem_dim / 8
         problem = Knapsack(cfg.problem_dim, n_problems=1, device=cfg.device, params={"capacity": cfg.capacity})
-        actor = KnapsackActor(problem, cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = KnapsackActorRLBSA(problem, cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = KnapsackActorNSA(problem, cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
     elif cfg.problem == "binpacking":
         problem = BinPacking(cfg.problem_dim, n_problems=1, device=cfg.device)
-        actor = BinPackingActor(cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = BinPackingActorRLBSA(cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = BinPackingActorNSA(cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
     elif cfg.problem == "tsp":
         problem = TSP(cfg.problem_dim, n_problems=1, device=cfg.device)
-        actor = TSPActor(cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = TSPActorRLBSA(cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = TSPActorNSA(cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
+    elif cfg.problem == "rosenbrock":
+        problem = Rosenbrock(cfg.problem_dim, n_problems=1, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = RosenbrockActorRLBSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = RosenbrockActorNSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
     else:
         raise ValueError("Invalid problem name.")
 
     if cfg.model_path is None:
-        training_problem_dim = 20 if cfg.problem == "tsp" else 50
+        if cfg.problem == "tsp":
+            training_problem_dim = 20
+        elif cfg.problem == "rosenbrock":
+          training_problem_dim = 2
+        else:
+          training_problem_dim = 50
+          
         cfg.model_path = (
-            "models/" + cfg.problem + str(training_problem_dim) + "-" + cfg.training.method + ".pt"
+            "models/" + cfg.problem + str(training_problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method + ".pt"
         )
 
     # Load trained model
@@ -159,15 +204,15 @@ def main(cfg: NeuralSAExperiment) -> None:
     create_folder(path)
     save(
         random_out,
-        os.path.join(path, "random_out_" + str(cfg.problem_dim) + "-" + cfg.training.method),
+        os.path.join(path, "random_out_" + str(cfg.problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method),
     )
     save(
         train_out_sampled,
-        os.path.join(path, "train_out_sampled_" + str(cfg.problem_dim) + "-" + cfg.training.method),
+        os.path.join(path, "train_out_sampled_" + str(cfg.problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method),
     )
     save(
         train_out_greedy,
-        os.path.join(path, "train_out_greedy_" + str(cfg.problem_dim) + "-" + cfg.training.method),
+        os.path.join(path, "train_out_greedy_" + str(cfg.problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method),
     )
 
 

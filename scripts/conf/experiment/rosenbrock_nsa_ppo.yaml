@@ -4,10 +4,9 @@ defaults:
   - training: ppo
   - sa: bin
 n_problems: 256
-problem_dim: 50
+problem_dim: 2
 embed_dim: 16
-problem: knapsack
-method_type: nsa  # default to NSA for backward compatibility
+problem: rosenbrock
+method_type: nsa
 device: cuda:0
 data_path: datasets
-capacity: 12.5

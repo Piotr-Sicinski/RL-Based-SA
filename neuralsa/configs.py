@@ -47,6 +47,7 @@ class NeuralSAExperiment:
     sa: SAConfig = field(default_factory=SAConfig)
 
     problem: str = "tsp"
+    method_type: str = "nsa"  # "nsa" or "rlbsa"
     capacity: Optional[float] = field(default=None)
     device: str = "cuda:0"
     model_path: Optional[str] = field(default=None)

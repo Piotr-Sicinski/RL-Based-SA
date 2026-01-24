@@ -103,6 +103,50 @@ class Rosenbrock(Problem):
         x = torch.randn(self.n_problems, self.dim, device=self.device, generator=self.generator)
         return torch.cat([x, self.state_encoding], -1)
 
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None) -> torch.Tensor:
+        """Construct state for Rosenbrock (flat vector structure)
+        
+        Args:
+            x: [batch, dim] - current solution
+            temp: [batch, 1] or scalar - temperature
+            delta_e: [batch, 1] or None - energy change (for RLBSA)
+            
+        Returns:
+            state: [batch, dim + 2 + 1 + (1 if delta_e)] - flat state vector
+        """
+        # x: [batch, dim], state_encoding: [batch, 2], temp: [batch, 1]
+        if temp.dim() == 0 or (temp.dim() == 1 and temp.shape[0] == 1):
+            # Scalar or single value, expand to [batch, 1]
+            temp = temp.view(1, 1).expand(x.shape[0], 1)
+        elif temp.dim() == 1:
+            # [batch] -> [batch, 1]
+            temp = temp.unsqueeze(-1)
+        
+        state = torch.cat([x, self.state_encoding, temp], -1)
+        
+        if delta_e is not None:
+            if delta_e.dim() == 1:
+                delta_e = delta_e.unsqueeze(-1)
+            state = torch.cat([state, delta_e], -1)
+        
+        return state
+
+    def from_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Extract x, spec, temp from state (ignoring ΔE if present)
+        
+        Args:
+            state: [batch, dim + 2 + 1 + (1 if delta_e)]
+            
+        Returns:
+            x: [batch, dim]
+            spec: [batch, 2] (a, b/100)
+            temp: [batch, 1]
+        """
+        x = state[..., :self.dim]
+        spec = state[..., self.dim:self.dim + 2]
+        temp = state[..., self.dim + 2:self.dim + 3]
+        return x, spec, temp
+
     def cost(self, s: torch.Tensor) -> torch.Tensor:
         """Evaluate Rosenbrock
 
@@ -176,13 +220,18 @@ class Knapsack(Problem):
         x = self.generate_init_x()
         return torch.cat([x, self.state_encoding], -1)
 
+    # def cost(self, s: torch.Tensor) -> torch.Tensor:
+    #     # s: [batch, dim, 1], binary solution
+    #     v = torch.sum(self.values * s[..., 0], -1)
+    #     w = torch.sum(self.weights * s[..., 0], -1)
+    #     # penalize overweight solutions
+    #     penalty = (w > self.capacity[..., 0]).float() * 1e6
+    #     return -(v - penalty)  # negative because SA minimizes energy
+
     def cost(self, s: torch.Tensor) -> torch.Tensor:
-        # s: [batch, dim, 1], binary solution
         v = torch.sum(self.values * s[..., 0], -1)
         w = torch.sum(self.weights * s[..., 0], -1)
-        # penalize overweight solutions
-        penalty = (w > self.capacity[..., 0]).float() * 1e6
-        return -(v - penalty)  # negative because SA minimizes energy
+        return -v * (w < self.capacity[..., 0])
 
     def update(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         """

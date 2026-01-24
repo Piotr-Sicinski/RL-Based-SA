@@ -39,19 +39,154 @@ class SAModel(nn.Module):
                 m.bias.data.fill_(0.01)
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple
+# ============================================================
+# KNAPSACK - NSA (Original Neural SA without RL enhancements)
+# ============================================================
 
-class KnapsackActor(SAModel):
+class KnapsackActorNSA(SAModel):
+    """Original NSA actor for Knapsack - simple MLP without LSTM or delta_e"""
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__(device)
+        self.problem = problem
+        self.embed_dim = embed_dim
+        
+        # State features per item: x(1) + weights(1) + values(1) + capacity(1) + temp(1)
+        self.state_dim = 5
+        
+        # Simple MLP (using 'embed' to match original architecture)
+        self.embed = nn.Sequential(
+            nn.Linear(self.state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, device=device),
+        )
+        
+        self.embed.apply(self.init_weights)
+    
+    def sample(
+        self, state: torch.Tensor, greedy: bool = False, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        state: [batch, problem_dim, 5]
+        returns: action [batch, problem_dim], log_probs [batch]
+        """
+        # Extract state components
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity
+        # by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
+        # Compute logits and apply mask
+        logits = self.embed(state)[..., 0] + mask
+        probs = torch.softmax(logits, dim=-1)
+        
+        if greedy:
+            smpl = torch.argmax(probs, dim=-1)
+        else:
+            smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
+        
+        action = F.one_hot(smpl, num_classes=problem_dim)
+        log_probs = torch.log(probs[action.bool()])
+        
+        return action, log_probs
+    
+    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        # uniform random action - sample one item to flip, respecting capacity constraints
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
+        logits = torch.ones((state.shape[0], problem_dim), device=state.device) + mask
+        probs = torch.softmax(logits, dim=-1)
+        
+        smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
+        action = F.one_hot(smpl, num_classes=problem_dim)
+        log_probs = torch.log(probs[action.bool()])
+        
+        return action, log_probs
+    
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs):
+        """
+        state: [batch, problem_dim, 5]
+        action: [batch, problem_dim] one-hot encoded
+        """
+        # Extract state components
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity
+        # by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
+        # Get logits and compute log-probabilities of the action taken
+        logits = self.embed(state)[..., 0] + mask
+        log_probs = torch.log_softmax(logits, dim=-1)
+        return log_probs[action.bool()]
+
+
+class KnapsackCriticNSA(nn.Module):
+    """Original NSA critic for Knapsack"""
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        self.device = device
+        self.problem = problem
+        self.state_dim = 5  # x + weight + value + capacity + temp
+        self.embed_dim = embed_dim
+        
+        self.embed = nn.Sequential(
+            nn.Linear(self.state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, device=device),
+        )
+        
+        self.init_weights()
+    
+    def init_weights(self):
+        for m in self.embed:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    m.bias.data.fill_(0.01)
+    
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        state: [batch, problem_dim, 5]
+        returns: value estimate [batch]
+        """
+        values = self.embed(state[..., :5])  # [batch, problem_dim, 1]
+        return values.mean(dim=1).squeeze(-1)  # [batch]
+
+
+# ============================================================
+# KNAPSACK - RLBSA (RL-Based SA with LSTM and delta_e)
+# ============================================================
+
+class KnapsackActorRLBSA(SAModel):
+    """RLBSA actor for Knapsack with LSTM and delta_e support"""
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
         self.problem = problem
         self.embed_dim = embed_dim
 
         # State features per item: x(1) + weights(1) + values(1) + capacity(1) + temp(1) + delta_e(1)
-        # We'll use 5 initially (no delta_e), and handle 6 if delta_e is added
         self.state_dim_min = 5  # x + weight + value + capacity + temp
         self.state_dim_max = 6  # + delta_e
 
@@ -105,7 +240,21 @@ class KnapsackActor(SAModel):
         hidden: Tuple[torch.Tensor, torch.Tensor] = None,
         greedy: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        # Extract state components for masking
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity
+        # by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
         logits, hidden = self.forward(state, hidden)
+        logits = logits + mask
         probs = torch.softmax(logits, dim=-1)
 
         if greedy:
@@ -113,18 +262,31 @@ class KnapsackActor(SAModel):
         else:
             smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
 
-        action = F.one_hot(smpl, num_classes=self.problem.dim).float()
+        action = F.one_hot(smpl, num_classes=self.problem.dim)
         log_probs = torch.log(probs[action.bool()])
 
         return action, log_probs, hidden
 
     def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        # uniform random action - sample one item to flip
-        batch_size = state.shape[0]
-        problem_dim = self.problem.dim
-        smpl = torch.randint(0, problem_dim, (batch_size,), device=state.device, generator=self.generator)
-        action = F.one_hot(smpl, num_classes=problem_dim).float()
-        log_probs = torch.log(torch.ones(batch_size, device=state.device) / problem_dim)
+        # uniform random action - sample one item to flip, respecting capacity constraints
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
+        logits = torch.ones((state.shape[0], problem_dim), device=state.device) + mask
+        probs = torch.softmax(logits, dim=-1)
+        
+        smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
+        action = F.one_hot(smpl, num_classes=problem_dim)
+        log_probs = torch.log(probs[action.bool()])
+        
         return action, log_probs
 
     def evaluate(self, state: torch.Tensor, action: torch.Tensor, hidden=None):
@@ -132,14 +294,28 @@ class KnapsackActor(SAModel):
         state: [batch, problem_dim, features]
         action: [batch, problem_dim] one-hot encoded
         """
+        # Extract state components for masking
+        n_problems, problem_dim, _ = state.shape
+        x = state[..., 0]
+        weights = state[..., 1]
+        capacity = state[..., 3] * problem_dim
+        
+        # Compute mask to avoid exceeding the knapsack's capacity
+        # by selecting too heavy items
+        total_weight = torch.sum(weights * x, -1)
+        free_space = capacity - extend_to(total_weight, capacity)
+        oversized = (weights > free_space) * (x == 0)
+        mask = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        
         logits, _ = self.forward(state, hidden)
+        logits = logits + mask
         log_probs = torch.log_softmax(logits, dim=-1)
         # Get log prob of the selected action
         return log_probs[action.bool()]
 
 
-
-class KnapsackCritic(nn.Module):
+class KnapsackCriticRLBSA(nn.Module):
+    """RLBSA critic for Knapsack with delta_e support"""
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
         self.device = device
@@ -181,9 +357,21 @@ class KnapsackCritic(nn.Module):
         return values.mean(dim=1).squeeze(-1)  # [batch]
 
 
+# ============================================================
+# BACKWARD COMPATIBILITY ALIASES
+# ============================================================
+# Default to NSA for backward compatibility
+KnapsackActor = KnapsackActorNSA
+KnapsackCritic = KnapsackCriticNSA
 
 
-class BinPackingActor(SAModel):
+
+
+# ============================================================
+# BINPACKING - NSA (Original Neural SA)
+# ============================================================
+
+class BinPackingActorNSA(SAModel):
     def __init__(self, embed_dim: int, device: str) -> None:
         super().__init__(device)
         self.state_dim = 3
@@ -394,7 +582,7 @@ class BinPackingActor(SAModel):
         return torch.cat((item.view(-1, 1), bin.view(-1, 1)), dim=-1), None
 
 
-class BinPackingCritic(nn.Module):
+class BinPackingCriticNSA(nn.Module):
     def __init__(self, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
         self.q_func = nn.Sequential(
@@ -419,7 +607,34 @@ class BinPackingCritic(nn.Module):
         return q_values.mean(dim=-1)
 
 
-class TSPActor(SAModel):
+# ============================================================
+# BINPACKING - RLBSA (Not yet implemented)
+# ============================================================
+
+class BinPackingActorRLBSA(SAModel):
+    """RLBSA actor for BinPacking - NOT YET IMPLEMENTED"""
+    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__(device)
+        raise NotImplementedError("RLBSA for BinPacking is not yet implemented. Use BinPackingActorNSA instead.")
+
+
+class BinPackingCriticRLBSA(nn.Module):
+    """RLBSA critic for BinPacking - NOT YET IMPLEMENTED"""
+    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        raise NotImplementedError("RLBSA for BinPacking is not yet implemented. Use BinPackingCriticNSA instead.")
+
+
+# Backward compatibility - default to NSA
+BinPackingActor = BinPackingActorNSA
+BinPackingCritic = BinPackingCriticNSA
+
+
+# ============================================================
+# TSP - NSA (Original Neural SA)
+# ============================================================
+
+class TSPActorNSA(SAModel):
     def __init__(self, embed_dim: int, device: str) -> None:
         super().__init__(device)
         self.c1_state_dim = 7
@@ -622,7 +837,7 @@ class TSPActor(SAModel):
         return log_probs[..., 0]
 
 
-class TSPCritic(nn.Module):
+class TSPCriticNSA(nn.Module):
     def __init__(self, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
         self.q_func = nn.Sequential(
@@ -657,7 +872,151 @@ class TSPCritic(nn.Module):
         return q_values.mean(dim=-1)
 
 
+# ============================================================
+# TSP - RLBSA (Not yet implemented)
+# ============================================================
+
+class TSPActorRLBSA(SAModel):
+    """RLBSA actor for TSP - NOT YET IMPLEMENTED"""
+    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__(device)
+        raise NotImplementedError("RLBSA for TSP is not yet implemented. Use TSPActorNSA instead.")
+
+
+class TSPCriticRLBSA(nn.Module):
+    """RLBSA critic for TSP - NOT YET IMPLEMENTED"""
+    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        raise NotImplementedError("RLBSA for TSP is not yet implemented. Use TSPCriticNSA instead.")
+
+
+# Backward compatibility - default to NSA
+TSPActor = TSPActorNSA
+TSPCritic = TSPCriticNSA
+
+
+# ============================================================
+# ROSENBROCK - NSA (Original)
+# ============================================================
+
+class RosenbrockActorNSA(SAModel):
+    """NSA actor for Rosenbrock - Gaussian policy"""
+    def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__(device)
+        self.problem_dim = problem_dim
+        # State: x (problem_dim) + a (1) + b (1) + temp (1) = problem_dim + 3
+        state_dim = problem_dim + 3
+        self.mu = torch.zeros(problem_dim, device=device)
+        self.log_var = nn.Sequential(
+            nn.Linear(state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, problem_dim, device=device),
+            nn.Hardtanh(min_val=-6, max_val=2.0),
+        )
+        self.log_var.apply(self.init_weights)
+
+    def sample(self, state: torch.Tensor, greedy: bool = False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        state: [batch, problem_dim + 3] where last 3 are (a, b, temp)
+        returns: action [batch, problem_dim], log_probs [batch]
+        """
+        batch_size = state.shape[0]
+        mu = self.mu.repeat(batch_size, 1)
+        log_var = self.log_var(state)
+        
+        if greedy:
+            action = mu
+        else:
+            action = mu + torch.exp(0.5 * log_var) * torch.randn(
+                (batch_size, self.problem_dim), device=state.device, generator=self.generator
+            )
+        
+        # Compute log probability
+        log_prob = -0.5 * (
+            log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
+            torch.pow(action - mu, 2) / log_var.exp()
+        )
+        return action, log_prob.sum(dim=1)
+
+    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Random Gaussian action"""
+        batch_size = state.shape[0]
+        action = torch.randn((batch_size, self.problem_dim), device=state.device, generator=self.generator)
+        # Uniform log prob (not exact, but for baseline)
+        log_probs = torch.zeros(batch_size, device=state.device)
+        return action, log_probs
+
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Evaluate log prob of action given state"""
+        batch_size = state.shape[0]
+        mu = self.mu.repeat(batch_size, 1)
+        log_var = self.log_var(state)
+        log_prob = -0.5 * (
+            log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
+            torch.pow(action - mu, 2) / log_var.exp()
+        )
+        return log_prob.sum(dim=1)
+
+
+class RosenbrockCriticNSA(nn.Module):
+    """NSA critic for Rosenbrock"""
+    def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        state_dim = problem_dim + 3  # x + a + b + temp
+        self.value_func = nn.Sequential(
+            nn.Linear(state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, device=device),
+        )
+        self.value_func.apply(self.init_weights)
+
+    @staticmethod
+    def init_weights(m: nn.Module) -> None:
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                m.bias.data.fill_(0.01)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        state: [batch, problem_dim + 3]
+        returns: value [batch]
+        """
+        return self.value_func(state).squeeze(-1)
+
+
+# ============================================================
+# ROSENBROCK - RLBSA (Not yet implemented)
+# ============================================================
+
+class RosenbrockActorRLBSA(SAModel):
+    """RLBSA actor for Rosenbrock - NOT YET IMPLEMENTED"""
+    def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__(device)
+        raise NotImplementedError("RLBSA for Rosenbrock is not yet implemented. Use RosenbrockActorNSA instead.")
+
+
+class RosenbrockCriticRLBSA(nn.Module):
+    """RLBSA critic for Rosenbrock - NOT YET IMPLEMENTED"""
+    def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+        super().__init__()
+        raise NotImplementedError("RLBSA for Rosenbrock is not yet implemented. Use RosenbrockCriticNSA instead.")
+
+
+# Backward compatibility - default to NSA
+RosenbrockActor = RosenbrockActorNSA
+RosenbrockCritic = RosenbrockCriticNSA
+
+
+# ============================================================
+# LEGACY ROSENBROCK (Original combined actor-critic)
+# ============================================================
+
 class RosenNet(nn.Module):
+    """Legacy combined actor-critic for Rosenbrock - DEPRECATED
+    
+    Use RosenbrockActorNSA and RosenbrockCriticNSA instead.
+    """
     def __init__(self, problem_dim: int, embed_dim: int) -> None:
         super().__init__()
         state_dim = problem_dim + 1

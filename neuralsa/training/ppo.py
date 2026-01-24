@@ -59,10 +59,26 @@ def ppo(
         nt = len(transitions)
         # Gather transition information into tensors
         batch = Transition(*zip(*transitions))
-        # State shape: [nt, n_problems, problem_dim, features] -> [nt*n_problems, problem_dim, features]
-        state = torch.stack(batch.state).reshape(nt * n_problems, problem_dim, -1).to(device)
-        action = torch.stack(batch.action).detach().reshape(nt * n_problems, problem_dim)
-        next_state = torch.stack(batch.next_state).detach().reshape(nt * n_problems, problem_dim, -1).to(device)
+        
+        # Detect if we have flat states (Rosenbrock) or per-item states (Knapsack, BinPacking, TSP)
+        first_state = batch.state[0]
+        is_flat_state = (first_state.dim() == 2)  # [batch, features] vs [batch, problem_dim, features]
+        
+        if is_flat_state:
+            # Flat state structure (Rosenbrock - continuous optimization)
+            # States: [nt, n_problems, features] -> [nt*n_problems, features]
+            # Actions: [nt, n_problems, action_dim] -> [nt*n_problems, action_dim]
+            state = torch.stack(batch.state).reshape(nt * n_problems, -1).to(device)
+            action = torch.stack(batch.action).detach().reshape(nt * n_problems, -1)
+            next_state = torch.stack(batch.next_state).detach().reshape(nt * n_problems, -1).to(device)
+        else:
+            # Per-item state structure (Knapsack, BinPacking, TSP - discrete problems)
+            # States: [nt, n_problems, problem_dim, features] -> [nt*n_problems, problem_dim, features]
+            # Actions: [nt, n_problems, problem_dim] -> [nt*n_problems, problem_dim] (one-hot or indices)
+            state = torch.stack(batch.state).reshape(nt * n_problems, problem_dim, -1).to(device)
+            action = torch.stack(batch.action).detach().reshape(nt * n_problems, problem_dim)
+            next_state = torch.stack(batch.next_state).detach().reshape(nt * n_problems, problem_dim, -1).to(device)
+        
         old_log_probs = torch.stack(batch.old_log_probs).view(nt * n_problems, -1)
         # Evaluate the critic
         state_values = critic(state).view(nt, n_problems, 1)

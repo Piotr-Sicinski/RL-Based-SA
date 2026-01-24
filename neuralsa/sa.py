@@ -52,21 +52,15 @@ def sa(
     costs = [min_cost]
     reward = None
 
-    # === Initial ΔE (energy change from previous step) ===
-    # Start with zero since there's no previous step
-    delta_e = torch.zeros((init_x.shape[0], 1), device=device)
-
-    # === Initial state (with ΔE) ===
-    state = problem.to_state(x, temp, delta_e).to(device)
-    next_state = state
-
     # ============================================================
     # LSTM hidden state (INIT ONCE PER ROLLOUT)
+    # Determine if we're using RLBSA (has LSTM) or NSA (no LSTM)
     # ============================================================
     use_lstm = hasattr(actor, "lstm")
+    use_delta_e = use_lstm  # RLBSA uses delta_e, NSA doesn't
 
     if use_lstm:
-        B = state.shape[0]          # batch size
+        B = init_x.shape[0]          # batch size
         H = actor.embed_dim
         hidden_actor = (
             torch.zeros(1, B, H, device=device),
@@ -74,6 +68,18 @@ def sa(
         )
     else:
         hidden_actor = None
+
+    # === Initial ΔE (energy change from previous step) ===
+    # Start with zero since there's no previous step
+    # Only use delta_e for RLBSA
+    if use_delta_e:
+        delta_e = torch.zeros((init_x.shape[0], 1), device=device)
+        state = problem.to_state(x, temp, delta_e).to(device)
+    else:
+        delta_e = None
+        state = problem.to_state(x, temp).to(device)
+    
+    next_state = state
 
     # ============================================================
     # SA MAIN LOOP
@@ -117,8 +123,11 @@ def sa(
             gain = cost - proposal_cost   # = -ΔE
             
             # Compute ΔE for next state: E(proposal) - E(current)
-            # This is what RL-Based SA adds to the state
-            current_delta_e = (proposal_cost - cost).unsqueeze(-1)
+            # This is what RL-Based SA adds to the state (only for RLBSA)
+            if use_delta_e:
+                current_delta_e = (proposal_cost - cost).unsqueeze(-1)
+            else:
+                current_delta_e = None
 
             # ----------------------------------------------------
             # Metropolis acceptance
@@ -162,12 +171,14 @@ def sa(
                 next_temp = temp
 
             # ----------------------------------------------------
-            # Next state (with ΔE)
+            # Next state (with ΔE if using RLBSA)
             # ----------------------------------------------------
-            next_state = problem.to_state(next_x, next_temp, current_delta_e)
-            
-            # Update delta_e for next iteration
-            delta_e = current_delta_e
+            if use_delta_e:
+                next_state = problem.to_state(next_x, next_temp, current_delta_e)
+                # Update delta_e for next iteration
+                delta_e = current_delta_e
+            else:
+                next_state = problem.to_state(next_x, next_temp)
 
             # ----------------------------------------------------
             # PPO reward
@@ -198,9 +209,9 @@ def sa(
                     cfg.training.gamma,
                 )
 
-            # Move forward
-            state = next_state
-            temp = next_temp
+        # Move forward
+        state = next_state.clone()
+        temp = next_temp
 
     # ============================================================
     # Final bookkeeping

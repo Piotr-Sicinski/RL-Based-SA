@@ -15,14 +15,24 @@ from tqdm import tqdm
 
 from neuralsa.configs import NeuralSAExperiment
 from neuralsa.model import (
-    BinPackingActor,
-    BinPackingCritic,
-    KnapsackActor,
-    KnapsackCritic,
-    TSPActor,
-    TSPCritic,
+    BinPackingActorNSA,
+    BinPackingCriticNSA,
+    BinPackingActorRLBSA,
+    BinPackingCriticRLBSA,
+    KnapsackActorNSA,
+    KnapsackCriticNSA,
+    KnapsackActorRLBSA,
+    KnapsackCriticRLBSA,
+    RosenbrockActorNSA,
+    RosenbrockCriticNSA,
+    RosenbrockActorRLBSA,
+    RosenbrockCriticRLBSA,
+    TSPActorNSA,
+    TSPCriticNSA,
+    TSPActorRLBSA,
+    TSPCriticRLBSA,
 )
-from neuralsa.problem import TSP, BinPacking, Knapsack
+from neuralsa.problem import TSP, BinPacking, Knapsack, Rosenbrock
 from neuralsa.sa import sa
 from neuralsa.training import EvolutionStrategies
 from neuralsa.training.ppo import ppo
@@ -92,16 +102,53 @@ def main(cfg: NeuralSAExperiment) -> None:
         )
         params = problem.generate_params()
         problem.set_params(**params)
-        actor = KnapsackActor(problem, cfg.embed_dim, device=cfg.device)
-        critic = KnapsackCritic(problem, cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = KnapsackActorRLBSA(problem, cfg.embed_dim, device=cfg.device)
+            critic = KnapsackCriticRLBSA(problem, cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = KnapsackActorNSA(problem, cfg.embed_dim, device=cfg.device)
+            critic = KnapsackCriticNSA(problem, cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
     elif cfg.problem == "binpacking":
         problem = BinPacking(cfg.problem_dim, cfg.n_problems, device=cfg.device)
-        actor = BinPackingActor(cfg.embed_dim, device=cfg.device)
-        critic = BinPackingCritic(cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = BinPackingActorRLBSA(cfg.embed_dim, device=cfg.device)
+            critic = BinPackingCriticRLBSA(cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = BinPackingActorNSA(cfg.embed_dim, device=cfg.device)
+            critic = BinPackingCriticNSA(cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
     elif cfg.problem == "tsp":
         problem = TSP(cfg.problem_dim, cfg.n_problems, device=cfg.device)
-        actor = TSPActor(cfg.embed_dim, device=cfg.device)
-        critic = TSPCritic(cfg.embed_dim, device=cfg.device)
+        
+        if cfg.method_type == "rlbsa":
+            actor = TSPActorRLBSA(cfg.embed_dim, device=cfg.device)
+            critic = TSPCriticRLBSA(cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = TSPActorNSA(cfg.embed_dim, device=cfg.device)
+            critic = TSPCriticNSA(cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
+            
+    elif cfg.problem == "rosenbrock":
+        problem = Rosenbrock(cfg.problem_dim, cfg.n_problems, device=cfg.device)
+        params = problem.generate_params()
+        problem.set_params(**params)
+        
+        if cfg.method_type == "rlbsa":
+            actor = RosenbrockActorRLBSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+            critic = RosenbrockCriticRLBSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+        elif cfg.method_type == "nsa":
+            actor = RosenbrockActorNSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+            critic = RosenbrockCriticNSA(cfg.problem_dim, cfg.embed_dim, device=cfg.device)
+        else:
+            raise ValueError(f"Invalid method_type: {cfg.method_type}. Use 'nsa' or 'rlbsa'.")
     else:
         raise ValueError("Invalid problem name.")
 
@@ -152,7 +199,7 @@ def main(cfg: NeuralSAExperiment) -> None:
             t.set_description(f"Training loss: {train_loss:.4f}")
 
             path = os.path.join(os.getcwd(), "models")
-            name = cfg.problem + str(cfg.problem_dim) + "-" + cfg.training.method + ".pt"
+            name = cfg.problem + str(cfg.problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method + ".pt"
             create_folder(path)
             torch.save(actor.state_dict(), os.path.join(path, name))
 

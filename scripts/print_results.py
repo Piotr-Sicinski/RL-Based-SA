@@ -29,16 +29,19 @@ cs.store(name="base_config", node=NeuralSAExperiment, group="experiment")
 def main(cfg: NeuralSAExperiment) -> None:
     # Load results
     path = os.path.join(os.getcwd(), cfg.results_path, cfg.problem)
-    random_out = load(path, "random_out_" + str(cfg.problem_dim) + "-" + cfg.training.method)
-    train_out_sampled = load(
-        path,
-        "train_out_sampled_" + str(cfg.problem_dim) + "-" + cfg.training.method,
-    )
-    train_out_greedy = load(
-        path, "train_out_greedy_" + str(cfg.problem_dim) + "-" + cfg.training.method
-    )
+    
+    # Build filename suffix with method_type and training method
+    suffix = str(cfg.problem_dim) + "-" + cfg.method_type + "-" + cfg.training.method
+    
+    random_out = load(path, "random_out_" + suffix)
+    train_out_sampled = load(path, "train_out_sampled_" + suffix)
+    train_out_greedy = load(path, "train_out_greedy_" + suffix)
 
-    # Print header
+    # Print header with method type
+    print(f"\n{'='*60}")
+    print(f"Results for {cfg.problem.upper()} - Method: {cfg.method_type.upper()} - Training: {cfg.training.method.upper()}")
+    print(f"Problem Dimension: {cfg.problem_dim}")
+    print(f"{'='*60}")
     header = "{:>8}  {:>4}  {:>24}  {:>12}".format("MODE", "K", "COST", "TIME")
     print(header)
 
@@ -59,17 +62,17 @@ def main(cfg: NeuralSAExperiment) -> None:
                 gt[i - 1] = train_out_greedy[m, i]["time"]
 
         # Print out mean results across the 5 runs
-        # Print results for vanilla SA
+        # Print results for baseline (random) SA
         if m == 10:
             random_res = "{:>8}  {:>4}  {:>24}  {:>12}".format(
-                "Random",
+                "Baseline",
                 str(m) + "x",
                 str(np.round(np.mean(r), 3)) + " +- " + str(np.round(np.std(r), 3)),
                 "{}".format(timedelta(seconds=int(np.mean(rt)))),
             )
             print(random_res)
 
-        # Print results for Sampled Neural SA
+        # Print results for Sampled NSA/RLBSA
         sampled_res = "{:>8}  {:>4}  {:>24}  {:>12}".format(
             "Sampled",
             str(m) + "x",
@@ -78,7 +81,7 @@ def main(cfg: NeuralSAExperiment) -> None:
         )
         print(sampled_res)
 
-        # Print results for Greedy Neural SA
+        # Print results for Greedy NSA/RLBSA
         if m == 1:
             greedy_res = "{:>8}  {:>4}  {:>24}  {:>12}".format(
                 "Greedy",
