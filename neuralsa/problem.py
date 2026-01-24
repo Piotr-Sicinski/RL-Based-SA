@@ -198,7 +198,7 @@ class Knapsack(Problem):
 
 
 class BinPacking(Problem):
-    x_dim = 1
+    x_dim = 1  # Per-item dimension (bin assignment)
 
     def __init__(
         self,
@@ -212,134 +212,220 @@ class BinPacking(Problem):
         Args:
             dim: num items
             n_problems: batch size
-            params: {'weight': torch.Tensor}
+            device: device to use
+            params: {'weights': torch.Tensor}
         """
         super().__init__(device)
         self.dim = dim
         self.n_problems = n_problems
+        self.capacity = 1.0  # WLOG capacity taken to be 1
         self.set_params(**params)
 
     def set_params(self, weights: torch.Tensor = None):
         """Set params.
 
         Args:
-            weights: [batch size, dim]
+            weights: [batch_size, dim]
         """
         self.weights = weights
-        self.capacity = 1
 
     def generate_params(self, mode: str = "train") -> Dict[str, torch.Tensor]:
         """Generate random weights in [0,1). Capacity taken to be 1.
 
         Returns:
-            weights [num problems]
+            dict with 'weights' [n_problems, dim]
         """
-        # WLOG capacity taken to be 1
         if mode == "test":
-            torch.manual_seed(0)
+            self.manual_seed(0)
         w = torch.rand(self.n_problems, self.dim, device=self.device, generator=self.generator)
         return {"weights": w}
 
-    def cost(self, s: torch.Tensor):
-        """Compute bin-packing objective (lower is better)
-
-        K = num occupied bins
-
-        Args:
-            s: [batch size, dim (item)]
-        """
-        x = s[..., 0].long()
-
-        # Num occupied bins
-        volumes = self.get_bin_volume(x)
-        occupied = (volumes > 0).float()
-        overflowed = (volumes > 1).float()
-
-        K = torch.sum(occupied, -1)
-        overflowed = (torch.sum(overflowed, -1) > 0.5).float()
-
-        # If overflowed set to max vol
-        return overflowed * self.dim + (1 - overflowed) * K
-
-    def update(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """Take bin assignment vector and update
-
-        e.g. [1,5,2,3] x [0,2,0,0] -> [1,2,2,3]
-        """
-        idx, src = a[:, 0], a[:, 1]
-        x = torch.scatter(s[..., 0], -1, idx[:, None], src[:, None].float())
-
-        return x[..., None]
-
     @property
     def state_encoding(self) -> torch.Tensor:
-        return self.weights[..., None]
-
-    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None) -> torch.Tensor:
-        batch_size, problem_dim, _ = x.shape
-        # Get weight of each item
-        w = self.weights.unsqueeze(2)
-        # Get the free capacity of each bin
-        wb = self.get_bin_volume(x[..., 0])
-        free_capacity = (1 - wb).unsqueeze(2)
-        # Concatenate all features
-        temp = repeat_to(temp, free_capacity)
-        state = torch.cat((x, w, free_capacity, temp), dim=-1)
-        if delta_e is not None:
-            state = torch.cat([state, repeat_to(delta_e, x)], -1)
-        return state
+        """
+        Returns problem parameters ψ.
+        
+        Returns:
+            [batch_size, dim, 1] tensor with per-item weights
+        """
+        return self.weights.unsqueeze(-1)
 
     def generate_init_x(self) -> torch.Tensor:
-        """State encoding has dims
-
-        [state enc] = [batch size, num items, concat]
+        """Generate initial bin assignments - each item in its own bin.
+        
+        Returns:
+            [batch_size, dim, 1] tensor where each item i is assigned to bin i
         """
-        x = torch.arange(self.dim, device=self.device) * torch.ones(
-            (self.n_problems, 1), device=self.device
-        )
-        return x[..., None]
+        x = torch.arange(self.dim, device=self.device).unsqueeze(0).expand(self.n_problems, -1)
+        return x.unsqueeze(-1).float()
 
     def generate_init_state(self) -> torch.Tensor:
-        """State encoding has dims
-
-        [state enc] = [batch size, num items, concat]
+        """State encoding has dims [batch_size, dim, features]
+        
+        Features per item: [bin_assignment, weight]
+        
+        Returns:
+            [batch_size, dim, 2] tensor
         """
         x = self.generate_init_x()
         return torch.cat([x, self.state_encoding], -1)
 
-    def get_bin_volume(self, x: torch.Tensor) -> torch.Tensor:
-        """Volume in each bin
-
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, energy: torch.Tensor = None, 
+                 delta_energy: torch.Tensor = None) -> torch.Tensor:
+        """Convert solution x to full state representation.
+        
+        According to RL-Based-SA paper (Section 3.5):
+        State for discrete problems: S_i = (x, ψ, E, ΔE, T)
+        
         Args:
-            x: [..., items] each element indexes into a bin
+            x: [batch_size, dim, 1] bin assignments
+            temp: temperature values (scalar, [batch_size], or [batch_size, 1])
+            energy: current energy E (optional, scalar, [batch_size], or [batch_size, 1])
+            delta_energy: energy change ΔE (optional, scalar, [batch_size], or [batch_size, 1])
+            
         Returns:
-            [..., 1, bins] tensor
+            [batch_size, dim, 6] tensor with features:
+            [bin_assignment, weight, free_capacity, E, ΔE, T]
         """
-        volumes = torch.zeros(x.shape, device=self.device).float()
-        volumes.scatter_add_(-1, x.long(), self.weights)
+        batch_size, problem_dim, _ = x.shape
+        
+        # Helper function to normalize to [batch_size, 1]
+        def normalize_to_batch(tensor, default_val=0.0):
+            if tensor is None:
+                return torch.full((batch_size, 1), default_val, device=self.device)
+            if tensor.dim() == 0:
+                # Scalar
+                return tensor.view(1, 1).expand(batch_size, 1)
+            elif tensor.dim() == 1:
+                # [batch_size] or [1]
+                if tensor.size(0) == 1:
+                    return tensor.view(1, 1).expand(batch_size, 1)
+                else:
+                    return tensor.unsqueeze(-1)
+            else:
+                # [batch_size, 1] or [1, 1]
+                if tensor.size(0) == 1:
+                    return tensor.expand(batch_size, -1)
+                else:
+                    return tensor
+        
+        # Get weight of each item (ψ - problem parameters)
+        w = self.weights.unsqueeze(-1)  # [batch_size, dim, 1]
+        
+        # Get the free capacity of each bin
+        wb = self.get_bin_volume(x[..., 0])  # [batch_size, dim]
+        free_capacity = (self.capacity - wb).unsqueeze(-1)  # [batch_size, dim, 1]
+        
+        # Energy E - broadcast to all items
+        if energy is None:
+            energy = self.cost(x)  # [batch_size]
+        energy_norm = normalize_to_batch(energy)  # [batch_size, 1]
+        E = energy_norm.unsqueeze(1).expand(-1, problem_dim, -1)  # [batch_size, dim, 1]
+        
+        # Energy change ΔE - broadcast to all items
+        delta_energy_norm = normalize_to_batch(delta_energy, default_val=0.0)  # [batch_size, 1]
+        delta_E = delta_energy_norm.unsqueeze(1).expand(-1, problem_dim, -1)  # [batch_size, dim, 1]
+        
+        # Temperature T - broadcast to all items
+        temp_norm = normalize_to_batch(temp, default_val=1.0)  # [batch_size, 1]
+        temp_expanded = temp_norm.unsqueeze(1).expand(-1, problem_dim, -1)  # [batch_size, dim, 1]
+        
+        # Concatenate all features: [x, ψ, E, ΔE, T]
+        # where ψ includes both weight and free_capacity
+        state = torch.cat((x, w, free_capacity, E, delta_E, temp_expanded), dim=-1)
+        
+        return state
+
+    def cost(self, s: torch.Tensor) -> torch.Tensor:
+        """Compute bin-packing objective (lower is better).
+        
+        Objective: minimize number of occupied bins
+        Penalty: heavily penalize overflow
+        
+        Args:
+            s: [batch_size, dim, 1] bin assignments
+            
+        Returns:
+            [batch_size] costs (energy E)
+        """
+        x = s[..., 0].long()
+
+        # Get volume in each bin
+        volumes = self.get_bin_volume(x)
+        
+        # Count occupied bins (bins with volume > 0)
+        occupied = (volumes > 0).float()
+        K = torch.sum(occupied, -1)
+        
+        # Check for overflow (bins with volume > capacity)
+        overflowed = (volumes > self.capacity).float()
+        has_overflow = (torch.sum(overflowed, -1) > 0.5).float()
+
+        # Penalize overflow heavily
+        penalty = has_overflow * self.dim * 10  # Large penalty for overflow
+        
+        return K + penalty
+
+    def update(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """Update bin assignments based on action.
+        
+        Action specifies: move item_idx to bin_idx
+        
+        Args:
+            s: [batch_size, dim, 1] current bin assignments
+            a: [batch_size, 2] action (item_idx, bin_idx)
+            
+        Returns:
+            [batch_size, dim, 1] updated bin assignments
+        """
+        item_idx = a[:, 0].long()  # [batch_size]
+        bin_idx = a[:, 1].long()   # [batch_size]
+        
+        # Clone current state
+        x_new = s[..., 0].clone()
+        
+        # Update: assign item_idx to bin_idx
+        # Use scatter to update the selected items
+        x_new.scatter_(1, item_idx.unsqueeze(1), bin_idx.unsqueeze(1).float())
+        
+        return x_new.unsqueeze(-1)
+
+    def get_bin_volume(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute volume in each bin.
+        
+        Args:
+            x: [batch_size, dim] bin assignments (each element indexes into a bin)
+            
+        Returns:
+            [batch_size, dim] volumes per bin
+        """
+        volumes = torch.zeros_like(x, dtype=torch.float32, device=self.device)
+        volumes.scatter_add_(1, x.long(), self.weights)
         return volumes
 
     def get_item_weight(self, item: torch.Tensor) -> torch.Tensor:
-        """Weight of item
-
+        """Get weight of specific items.
+        
         Args:
-            item: [...]
+            item: [batch_size] item indices
+            
         Returns:
-            [...] tensor
+            [batch_size] weights
         """
-        # return torch.sum(item * self.weights, -1)
-        return self.weights[torch.arange(len(item)), item]
+        batch_indices = torch.arange(len(item), device=self.device)
+        return self.weights[batch_indices, item.long()]
 
     def get_item_bin_volume(self, x: torch.Tensor) -> torch.Tensor:
-        """Volume of the bin the current item is in
-
+        """Get volume of the bin that each item is currently in.
+        
         Args:
-            X: [..., items, bins]
+            x: [batch_size, dim] bin assignments
+            
         Returns:
-            [..., items, 1] tensor
+            [batch_size, dim] volume of each item's bin
         """
         volumes = self.get_bin_volume(x)
-        return torch.gather(volumes, -1, x.long())
+        return torch.gather(volumes, 1, x.long())
 
 
 class TSP(Problem):

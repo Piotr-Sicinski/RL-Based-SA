@@ -59,10 +59,6 @@ def sa(
     # === Initial state (with ΔE) ===
     state = problem.to_state(x, temp, delta_e).to(device)
     next_state = state
-
-    # ============================================================
-    # LSTM hidden state (INIT ONCE PER ROLLOUT)
-    # ============================================================
     use_lstm = hasattr(actor, "lstm")
 
     if use_lstm:
@@ -74,26 +70,27 @@ def sa(
         )
     else:
         hidden_actor = None
-
-    # ============================================================
-    # SA MAIN LOOP
-    # ============================================================
     for _ in range(cfg.sa.outer_steps):
         for j in range(cfg.sa.inner_steps):
 
             if record_state:
                 states.append(state)
-
-            # ----------------------------------------------------
-            # Sample action
-            # ----------------------------------------------------
             if baseline:
                 action, old_log_probs = actor.baseline_sample(
                     state, random_std=random_std, problem=problem
                 )
             else:
                 if hidden_actor is None:
-                    action, old_log_probs = actor.sample(state, greedy=greedy)
+                    sample_result = actor.sample(state, greedy=greedy)
+                    if len(sample_result) == 4:
+                        # BinPacking with LSTM: (action, log_probs, item_hidden, bin_hidden)
+                        action, old_log_probs, _, _ = sample_result
+                    elif len(sample_result) == 3:
+                        # Knapsack with LSTM: (action, log_probs, hidden)
+                        action, old_log_probs, _ = sample_result
+                    else:
+                        # Standard: (action, log_probs)
+                        action, old_log_probs = sample_result
                 else:
                     action, old_log_probs, hidden_actor = actor.sample(
                         state, hidden_actor, greedy=greedy

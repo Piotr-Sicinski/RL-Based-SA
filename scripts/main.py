@@ -96,8 +96,8 @@ def main(cfg: NeuralSAExperiment) -> None:
         critic = KnapsackCritic(problem, cfg.embed_dim, device=cfg.device)
     elif cfg.problem == "binpacking":
         problem = BinPacking(cfg.problem_dim, cfg.n_problems, device=cfg.device)
-        actor = BinPackingActor(cfg.embed_dim, device=cfg.device)
-        critic = BinPackingCritic(cfg.embed_dim, device=cfg.device)
+        actor = BinPackingActor(problem, cfg.embed_dim, device=cfg.device)
+        critic = BinPackingCritic(problem, cfg.embed_dim, device=cfg.device)
     elif cfg.problem == "tsp":
         problem = TSP(cfg.problem_dim, cfg.n_problems, device=cfg.device)
         actor = TSPActor(cfg.embed_dim, device=cfg.device)
