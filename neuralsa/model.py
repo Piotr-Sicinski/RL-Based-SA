@@ -44,7 +44,12 @@ class SAModel(nn.Module):
 # ============================================================
 
 class KnapsackActorNSA(SAModel):
-    """Original NSA actor for Knapsack - simple MLP without LSTM or delta_e"""
+    """Original NSA actor for Knapsack - simple MLP without LSTM or delta_e
+    
+    According to paper Section 4.1.1 (line 493-498), the original Neural SA
+    uses a two-layer MLP: 5 → 16 → 1 with 112 learnable parameters.
+    Input: [x_i, w_i, v_i, W, T]
+    """
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
         self.problem = problem
@@ -66,14 +71,14 @@ class KnapsackActorNSA(SAModel):
         self, state: torch.Tensor, greedy: bool = False, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        state: [batch, problem_dim, 5]
+        state: [batch, problem_dim, 5] with format [x, w, v, W, T]
         returns: action [batch, problem_dim], log_probs [batch]
         """
         # Extract state components
         n_problems, problem_dim, _ = state.shape
         x = state[..., 0]
         weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        capacity = state[..., 3]  # Raw capacity W (not normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity
         # by selecting too heavy items
@@ -102,7 +107,7 @@ class KnapsackActorNSA(SAModel):
         n_problems, problem_dim, _ = state.shape
         x = state[..., 0]
         weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        capacity = state[..., 3]  # Raw capacity W (not normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity by selecting too heavy items
         total_weight = torch.sum(weights * x, -1)
@@ -129,7 +134,7 @@ class KnapsackActorNSA(SAModel):
         n_problems, problem_dim, _ = state.shape
         x = state[..., 0]
         weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        capacity = state[..., 3]  # Raw capacity W (not normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity
         # by selecting too heavy items
@@ -182,15 +187,20 @@ class KnapsackCriticNSA(nn.Module):
 # ============================================================
 
 class KnapsackActorRLBSA(SAModel):
-    """RLBSA actor for Knapsack with LSTM and delta_e support"""
+    """RLBSA actor for Knapsack with LSTM and delta_e support
+    
+    According to paper Section 4.1.1 (line 504-510), the LSTM architecture
+    uses 7 input features: [x_i, w_i, v_i, W, E, ΔE, T]
+    """
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
         self.problem = problem
         self.embed_dim = embed_dim
 
-        # State features per item: x(1) + weights(1) + values(1) + capacity(1) + temp(1) + delta_e(1)
-        self.state_dim_min = 5  # x + weight + value + capacity + temp
-        self.state_dim_max = 6  # + delta_e
+        # State features per item: x(1) + w(1) + v(1) + W(1) + E(1) + ΔE(1) + T(1)
+        # Paper line 504-506: "three-layer network 7 → 16 → 16 → 1"
+        self.state_dim_min = 5  # x + weight + value + capacity + temp (NSA)
+        self.state_dim_max = 7  # + energy + delta_e (RLBSA)
 
         # Input projection before LSTM
         self.input_proj = nn.Linear(self.state_dim_max, embed_dim, device=device)
@@ -213,7 +223,10 @@ class KnapsackActorRLBSA(SAModel):
         self, state: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        state: [batch, problem_dim, features] where features = 5 or 6
+        state: [batch, problem_dim, features] where features can be 5, 6, or 7
+               - 5: [x, w, v, W, T] (NSA)
+               - 6: [x, w, v, W, T, ΔE] (intermediate)
+               - 7: [x, w, v, W, E, ΔE, T] (RLBSA - paper format)
         hidden: LSTM hidden state (h, c)
         returns: logits [batch, problem_dim], hidden
         """
@@ -243,10 +256,11 @@ class KnapsackActorRLBSA(SAModel):
         greedy: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         # Extract state components for masking
+        # State format: [x, w, v, W, ...] where W is at index 3
         n_problems, problem_dim, _ = state.shape
-        x = state[..., 0]
-        weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        x = state[..., 0]  # Current solution
+        weights = state[..., 1]  # Item weights
+        capacity = state[..., 3]  # Raw capacity W (no longer normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity
         # by selecting too heavy items
@@ -274,7 +288,7 @@ class KnapsackActorRLBSA(SAModel):
         n_problems, problem_dim, _ = state.shape
         x = state[..., 0]
         weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        capacity = state[..., 3]  # Raw capacity W (no longer normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity by selecting too heavy items
         total_weight = torch.sum(weights * x, -1)
@@ -300,7 +314,7 @@ class KnapsackActorRLBSA(SAModel):
         n_problems, problem_dim, _ = state.shape
         x = state[..., 0]
         weights = state[..., 1]
-        capacity = state[..., 3] * problem_dim
+        capacity = state[..., 3]  # Raw capacity W (no longer normalized)
         
         # Compute mask to avoid exceeding the knapsack's capacity
         # by selecting too heavy items
@@ -317,12 +331,16 @@ class KnapsackActorRLBSA(SAModel):
 
 
 class KnapsackCriticRLBSA(nn.Module):
-    """RLBSA critic for Knapsack with delta_e support"""
+    """RLBSA critic for Knapsack with delta_e support
+    
+    According to paper Section 4.1.1, should match actor's 7-feature input:
+    [x, w, v, W, E, ΔE, T]
+    """
     def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
         self.device = device
         self.problem = problem
-        self.state_dim_max = 6  # Match actor: x + weight + value + capacity + temp + delta_e
+        self.state_dim_max = 7  # Match actor: x + weight + value + capacity + energy + delta_e + temp
         self.embed_dim = embed_dim
 
         # MLP critic processes per-item features
@@ -343,7 +361,10 @@ class KnapsackCriticRLBSA(nn.Module):
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """
-        state: [batch, problem_dim, features] where features = 5 or 6
+        state: [batch, problem_dim, features] where features can be 5, 6, or 7
+               - 5: [x, w, v, W, T] (NSA)
+               - 6: [x, w, v, W, T, ΔE] (intermediate)
+               - 7: [x, w, v, W, E, ΔE, T] (RLBSA - paper format)
         returns: value estimate [batch]
         """
         batch_size, seq_len, features = state.shape

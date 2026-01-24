@@ -69,14 +69,17 @@ def sa(
     else:
         hidden_actor = None
 
-    # === Initial ΔE (energy change from previous step) ===
+    # === Initial ΔE (energy change from previous step) and E (current energy) ===
     # Start with zero since there's no previous step
-    # Only use delta_e for RLBSA
+    # Only use delta_e and current_energy for RLBSA
     if use_delta_e:
         delta_e = torch.zeros((init_x.shape[0], 1), device=device)
-        state = problem.to_state(x, temp, delta_e).to(device)
+        # For RLBSA: include current energy E in state [x, w, v, W, E, ΔE, T]
+        current_energy = cost.unsqueeze(-1)  # [batch, 1]
+        state = problem.to_state(x, temp, delta_e=delta_e, current_energy=current_energy).to(device)
     else:
         delta_e = None
+        current_energy = None
         state = problem.to_state(x, temp).to(device)
     
     next_state = state
@@ -171,10 +174,14 @@ def sa(
                 next_temp = temp
 
             # ----------------------------------------------------
-            # Next state (with ΔE if using RLBSA)
+            # Next state (with E and ΔE if using RLBSA)
             # ----------------------------------------------------
             if use_delta_e:
-                next_state = problem.to_state(next_x, next_temp, current_delta_e)
+                # For RLBSA: state includes current energy E and delta E
+                # State format: [x, w, v, W, E, ΔE, T] (7 features)
+                current_energy = cost.unsqueeze(-1)  # [batch, 1]
+                next_state = problem.to_state(next_x, next_temp, delta_e=current_delta_e, 
+                                              current_energy=current_energy)
                 # Update delta_e for next iteration
                 delta_e = current_delta_e
             else:

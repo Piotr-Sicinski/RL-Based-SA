@@ -206,9 +206,12 @@ class Knapsack(Problem):
         """
         Returns:
             [batch, dim, 3] tensor with per-item (weight, value, capacity)
+            
+        Note: According to the paper (Section 4.1.1), the state should include
+        raw capacity W, not normalized capacity. Each item gets the same W value.
         """
         ones = torch.ones((self.dim,), device=self.device)
-        capacity = self.capacity * ones / self.dim  # [batch, dim]
+        capacity = self.capacity * ones  # [batch, dim] - raw capacity W
         # Stack along last dimension to get [batch, dim, 3]
         return torch.stack([self.weights, self.values, capacity], -1)
 
@@ -219,6 +222,36 @@ class Knapsack(Problem):
     def generate_init_state(self) -> torch.Tensor:
         x = self.generate_init_x()
         return torch.cat([x, self.state_encoding], -1)
+
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None, 
+                 current_energy: torch.Tensor = None) -> torch.Tensor:
+        """Construct state with optional ΔE and current energy E
+        
+        Args:
+            x: Current solution [batch, dim, 1]
+            temp: Temperature [batch, 1] or scalar
+            delta_e: Energy change from previous step [batch, 1] or None
+            current_energy: Current energy E [batch, 1] or None (for RLBSA LSTM models)
+        
+        Returns:
+            state: [batch, dim, features] where features depends on what's included:
+                - Basic (NSA): [x, w, v, W, T] - 5 features
+                - With ΔE: [x, w, v, W, T, ΔE] - 6 features  
+                - With E and ΔE (RLBSA): [x, w, v, W, E, ΔE, T] - 7 features
+        """
+        # Keep per-item structure: [batch, dim, features]
+        # state_encoding gives us [batch, dim, 3] with [w, v, W]
+        state = torch.cat([x, self.state_encoding, repeat_to(temp, x)], -1)
+        
+        # For RLBSA with LSTM: add current energy E before ΔE
+        # Order: [x, w, v, W, E, ΔE, T] = 7 features
+        if current_energy is not None:
+            state = torch.cat([state, repeat_to(current_energy, x)], -1)
+        
+        if delta_e is not None:
+            state = torch.cat([state, repeat_to(delta_e, x)], -1)
+        
+        return state
 
     # def cost(self, s: torch.Tensor) -> torch.Tensor:
     #     # s: [batch, dim, 1], binary solution
