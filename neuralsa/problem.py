@@ -237,10 +237,15 @@ class Knapsack(Problem):
         """
         Apply XOR with action to flip bits.
         s: current solution [batch, dim, 1]
-        a: action [batch, dim] one-hot indicating which item to flip
+        a: action [batch, dim] or [batch, dim, 1] one-hot indicating which item to flip
         """
-        # Expand action to match s shape
-        a_expanded = a.unsqueeze(-1)  # [batch, dim, 1]
+        # Handle both [batch, dim] and [batch, dim, 1] formats
+        if a.dim() == 2:
+            # Expand action to match s shape: [batch, dim] -> [batch, dim, 1]
+            a_expanded = a.unsqueeze(-1)
+        else:
+            # Already [batch, dim, 1]
+            a_expanded = a
         # XOR: flip the bit where action is 1
         return ((s > 0.5) ^ (a_expanded > 0.5)).float()
 

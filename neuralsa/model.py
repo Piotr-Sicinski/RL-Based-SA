@@ -94,7 +94,8 @@ class KnapsackActorNSA(SAModel):
         action = F.one_hot(smpl, num_classes=problem_dim)
         log_probs = torch.log(probs[action.bool()])
         
-        return action, log_probs
+        # Return [batch, dim, 1] to match vanilla behavior
+        return action[..., None], log_probs
     
     def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         # uniform random action - sample one item to flip, respecting capacity constraints
@@ -116,7 +117,8 @@ class KnapsackActorNSA(SAModel):
         action = F.one_hot(smpl, num_classes=problem_dim)
         log_probs = torch.log(probs[action.bool()])
         
-        return action, log_probs
+        # Return [batch, dim, 1] to match vanilla behavior
+        return action[..., None], log_probs
     
     def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs):
         """
