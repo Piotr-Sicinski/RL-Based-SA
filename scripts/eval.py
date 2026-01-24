@@ -53,11 +53,11 @@ def main(cfg: NeuralSAExperiment) -> None:
                 cfg.capacity = 25
             else:
                 cfg.capacity = cfg.problem_dim / 8
-        problem = Knapsack(cfg.problem_dim, n_problems=1, device=cfg.device, params={"capacity": cfg.capacity})
+        problem = Knapsack(cfg.problem_dim, n_problems=256, device=cfg.device, params={"capacity": cfg.capacity})
         actor = KnapsackActor(problem, cfg.embed_dim, device=cfg.device)
     elif cfg.problem == "binpacking":
-        problem = BinPacking(cfg.problem_dim, n_problems=1, device=cfg.device)
-        actor = BinPackingActor(cfg.embed_dim, device=cfg.device)
+        problem = BinPacking(cfg.problem_dim, n_problems=256, device=cfg.device)
+        actor = BinPackingActor(problem, cfg.embed_dim, device=cfg.device)
     elif cfg.problem == "tsp":
         problem = TSP(cfg.problem_dim, n_problems=1, device=cfg.device)
         actor = TSPActor(cfg.embed_dim, device=cfg.device)
