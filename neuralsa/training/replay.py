@@ -7,7 +7,7 @@ from collections import deque, namedtuple
 from typing import List
 
 Transition = namedtuple(
-    "Transition", ("state", "action", "next_state", "reward", "old_log_probs", "gamma")
+    "Transition", ("state", "action", "next_state", "reward", "old_log_probs", "gamma", "hidden")
 )
 
 

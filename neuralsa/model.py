@@ -1364,7 +1364,7 @@ class RosenbrockCriticNSA(nn.Module):
 # ============================================================
 
 class RosenbrockActorRLBSA(SAModel):
-    """RLBSA actor for Rosenbrock with extended state features (E, ΔE)
+    """RLBSA actor for Rosenbrock with LSTM and extended state features (E, ΔE)
     
     According to paper section 4.2, the key innovation for continuous problems is
     adding current energy E and energy change ΔE to the state:
@@ -1373,12 +1373,8 @@ class RosenbrockActorRLBSA(SAModel):
     For 2D Rosenbrock with problem parameters (a, b):
     Full state: [x(2), a(1), b(1), E(1), ΔE(1), T(1)] = 7 features
     
-    Architecture: 2-layer MLP (7 → 16 → 16 → 2) as per paper Section 4.1.1
+    Architecture: LSTM-based network to capture temporal dependencies in SA trajectory
     Output: log variance for Gaussian action distribution (mean fixed at 0)
-    
-    Note: We use MLP instead of LSTM because PPO training shuffles data,
-    which breaks LSTM's temporal dependencies. The state features (E, ΔE)
-    already encode the relevant history.
     """
     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
@@ -1387,31 +1383,76 @@ class RosenbrockActorRLBSA(SAModel):
         
         # Full state: x(dim) + a(1) + b(1) + E(1) + ΔE(1) + T(1) = dim + 5
         # For 2D: 7 features
-        state_dim = problem_dim + 5
+        self.state_dim = problem_dim + 5
         
         # Mean fixed at zero (perturbation-based actions)
         self.mu = torch.zeros(problem_dim, device=device)
         
-        # 2-layer MLP: state_dim → embed_dim → embed_dim → problem_dim
-        # Paper says 7 → 16 → 16 → 2 for 2D continuous problems
-        self.log_var = nn.Sequential(
-            nn.Linear(state_dim, embed_dim, device=device),
-            nn.ReLU(),
+        # Input projection before LSTM
+        self.input_proj = nn.Linear(self.state_dim, embed_dim, device=device)
+        # LSTM processes temporal sequence
+        self.lstm = nn.LSTM(embed_dim, embed_dim, batch_first=True, device=device)
+        # Output layer produces log variance
+        self.output_layer = nn.Sequential(
             nn.Linear(embed_dim, embed_dim, device=device),
             nn.ReLU(),
             nn.Linear(embed_dim, problem_dim, device=device),
             nn.Hardtanh(min_val=-6, max_val=2.0),  # Constrain log variance
         )
-        self.log_var.apply(self.init_weights)
+        
+        self.init_weights()
+    
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        if self.input_proj.bias is not None:
+            self.input_proj.bias.data.fill_(0.01)
+        for m in self.output_layer:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    m.bias.data.fill_(0.01)
+    
+    def forward(
+        self, state: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        state: [batch, state_dim] where state_dim = problem_dim + 5
+        hidden: LSTM hidden state (h, c)
+        returns: log_var [batch, problem_dim], hidden
+        """
+        batch_size = state.shape[0]
+        
+        # Project input
+        x = self.input_proj(state)  # [batch, embed_dim]
+        
+        # Add sequence dimension for LSTM: [batch, seq_len=1, embed_dim]
+        x = x.unsqueeze(1)
+        
+        if hidden is None:
+            h0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
+            c0 = torch.zeros(1, batch_size, self.embed_dim, device=self.device)
+            hidden = (h0, c0)
+        
+        out, hidden = self.lstm(x, hidden)  # out: [batch, 1, embed_dim]
+        out = out.squeeze(1)  # [batch, embed_dim]
+        
+        log_var = self.output_layer(out)  # [batch, problem_dim]
+        return log_var, hidden
 
-    def sample(self, state: torch.Tensor, greedy: bool = False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def sample(
+        self, 
+        state: torch.Tensor, 
+        hidden: Tuple[torch.Tensor, torch.Tensor] = None,
+        greedy: bool = False,
+        **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         state: [batch, problem_dim + 5] where format is [x, a, b, E, ΔE, T]
-        returns: action [batch, problem_dim], log_probs [batch]
+        returns: action [batch, problem_dim], log_probs [batch], hidden
         """
         batch_size = state.shape[0]
         mu = self.mu.repeat(batch_size, 1)
-        log_var = self.log_var(state)
+        log_var, hidden = self.forward(state, hidden)
         
         if greedy:
             action = mu
@@ -1426,7 +1467,7 @@ class RosenbrockActorRLBSA(SAModel):
         log_prob = -0.5 * (
             np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)
         )
-        return action, log_prob.sum(dim=1)
+        return action, log_prob.sum(dim=1), hidden
 
     def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         """Random Gaussian action"""
@@ -1435,11 +1476,11 @@ class RosenbrockActorRLBSA(SAModel):
         log_probs = torch.zeros(batch_size, device=state.device)
         return action, log_probs
 
-    def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None) -> torch.Tensor:
         """Evaluate log prob of action given state"""
         batch_size = state.shape[0]
         mu = self.mu.repeat(batch_size, 1)
-        log_var = self.log_var(state)
+        log_var, _ = self.forward(state, hidden)
         var = torch.exp(log_var)
         log_prob = -0.5 * (
             np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)

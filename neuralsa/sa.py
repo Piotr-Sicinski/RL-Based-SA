@@ -209,8 +209,11 @@ def sa(
             # Replay + TBPTT
             # ----------------------------------------------------
             if replay is not None:
+                # Store detached hidden state for LSTM models
+                stored_hidden = None
                 if hidden_actor is not None:
                     hidden_actor = tuple(h.detach() for h in hidden_actor)
+                    stored_hidden = hidden_actor
 
                 replay.push(
                     state,
@@ -219,6 +222,7 @@ def sa(
                     reward,
                     old_log_probs,
                     cfg.training.gamma,
+                    stored_hidden,
                 )
 
         # Move forward
@@ -232,7 +236,7 @@ def sa(
 
     if replay is not None and len(replay) > 0:
         last_transition = replay.pop()
-        replay.push(*(list(last_transition[:-1]) + [0.0]))
+        replay.push(*(list(last_transition[:-2]) + [0.0, last_transition.hidden]))
 
     return {
         "best_x": best_x,
