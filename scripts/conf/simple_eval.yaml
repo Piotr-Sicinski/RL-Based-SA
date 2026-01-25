@@ -1,15 +1,15 @@
 # Simple evaluation configuration
 
 experiments:
-  # knapsack:
-  #   problem_sizes: [50, 100, 200, 500, 1000]
-  #   K: [1, 2, 5]
-  #   nsa: knapsack50-nsa-ppo
-  #   rlbsa: knapsack50-rlbsa-ppo
+  knapsack:
+    problem_sizes: [50, 100, 200, 500, 1000, 2000]
+    K: [5]
+    nsa: knapsack50-nsa-ppo
+    rlbsa: knapsack50-rlbsa-ppo
   
   rosenbrock:
     problem_sizes: [2]
-    K: [10, 20, 50, 100, 640]
+    K: [5, 10, 25, 50, 320, 500]
     nsa: rosenbrock2-nsa-ppo
     rlbsa: rosenbrock2-rlbsa-ppo
 
@@ -20,7 +20,7 @@ experiments:
     rlbsa: binpacking50-ppo
 
 # Number of parallel workers
-num_workers: 8
+num_workers: 4
 
 # Devices to distribute work across
 devices:
