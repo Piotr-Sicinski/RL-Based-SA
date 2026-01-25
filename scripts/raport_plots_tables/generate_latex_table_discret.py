@@ -113,8 +113,7 @@ def generate_latex_table(table_data):
 def main():
     # Paths
     project_root = Path(__file__).parent.parent.parent
-    # json_path = project_root / "outputs" / "results" / "knap_final_1.json"
-    json_path = project_root / "outputs" / "results" / "results_binpacking.json"
+    json_path = project_root / "outputs" / "results" / "knap_final_1.json"
 
     # Load and process data
     print(f"Loading data from {json_path}")

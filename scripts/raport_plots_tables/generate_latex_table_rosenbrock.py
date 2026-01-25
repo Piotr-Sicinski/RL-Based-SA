@@ -82,7 +82,7 @@ def extract_data(data):
 def format_value(value, pct, is_best):
     """Format a value with percentage, bolding if best."""
     value_str = f"{value:.4f}"
-    pct_str = f"({pct:.2f}\\%)"  # Use \\% to get \% in LaTeX
+    pct_str = f"({pct:.2f}\%)"
     
     if is_best:
         return f"\\textbf{{{value_str}}} {pct_str}"
