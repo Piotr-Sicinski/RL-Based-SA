@@ -102,7 +102,13 @@ def sa(
                 )
             else:
                 if hidden_actor is None:
-                    action, old_log_probs = actor.sample(state, greedy=greedy)
+                    sample_result = actor.sample(state, greedy=greedy)
+                    if len(sample_result) == 4:
+                        action, old_log_probs, _, _ = sample_result
+                    elif len(sample_result) == 3:
+                        action, old_log_probs, _ = sample_result
+                    else:
+                        action, old_log_probs = sample_result
                 else:
                     action, old_log_probs, hidden_actor = actor.sample(
                         state, hidden_actor, greedy=greedy

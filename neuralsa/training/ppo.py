@@ -76,7 +76,13 @@ def ppo(
             # States: [nt, n_problems, problem_dim, features] -> [nt*n_problems, problem_dim, features]
             # Actions: [nt, n_problems, problem_dim] -> [nt*n_problems, problem_dim] (one-hot or indices)
             state = torch.stack(batch.state).reshape(nt * n_problems, problem_dim, -1).to(device)
-            action = torch.stack(batch.action).detach().reshape(nt * n_problems, problem_dim)
+            action_stacked = torch.stack(batch.action).detach()
+            if action_stacked.shape[-1] == 2:
+                # BinPacking: actions are [nt, n_problems, 2] -> reshape to [nt * n_problems, 2]
+                action = action_stacked.reshape(nt * n_problems, 2)
+            else:
+                # Knapsack: actions are [nt, n_problems, problem_dim] -> reshape to [nt * n_problems, problem_dim]
+                action = action_stacked.reshape(nt * n_problems, problem_dim)
             next_state = torch.stack(batch.next_state).detach().reshape(nt * n_problems, problem_dim, -1).to(device)
         
         old_log_probs = torch.stack(batch.old_log_probs).view(nt * n_problems, -1)
