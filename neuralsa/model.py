@@ -636,16 +636,275 @@ class BinPackingCriticNSA(nn.Module):
 
 class BinPackingActorRLBSA(SAModel):
     """RLBSA actor for BinPacking - NOT YET IMPLEMENTED"""
-    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
-        raise NotImplementedError("RLBSA for BinPacking is not yet implemented. Use BinPackingActorNSA instead.")
+        self.problem = problem
+        self.embed_dim = embed_dim
+        
+        # State features per item/bin: [feature, E, ΔE, T]
+        # Item network: [w_i, c_b(i), E, ΔE, T] = 5 features
+        # Bin network: [w_i, c_j, E, ΔE, T] = 5 features
+        self.state_dim = 5
+
+        # Item selection network
+        self.embed_item = nn.Sequential(
+            nn.Linear(self.state_dim, embed_dim, bias=True, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, bias=True, device=device),
+        )
+        
+        # Bin selection network
+        self.embed_bin = nn.Sequential(
+            nn.Linear(self.state_dim, embed_dim, bias=True, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, bias=True, device=device),
+        )
+
+        self.embed_item.apply(self.init_weights)
+        self.embed_bin.apply(self.init_weights)
+
+    def sample_from_logits(
+        self,
+        logits: torch.Tensor,
+        mask: torch.Tensor = None,
+        greedy: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if mask is not None:
+            logits = logits + mask
+
+        probs = torch.softmax(logits, dim=-1)
+        if greedy:
+            smpl = torch.argmax(probs, dim=-1)
+        else:
+            smpl = torch.multinomial(probs, 1, generator=self.generator)[..., 0]
+
+        log_probs = torch.log(probs.gather(1, smpl.view(-1, 1)))
+        return smpl, log_probs
+
+    def sample(
+        self,
+        state: torch.Tensor,
+        hidden=None,
+        greedy: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, None]:
+        """
+        Sample action from current state.
+        
+        Args:
+            state: [batch, problem_dim, features] where features include:
+                   [x (bin assignment), w (weight), free_capacity, E, ΔE, T]
+            hidden: Not used for BinPacking (MLP), kept for compatibility
+            greedy: whether to use greedy selection
+            
+        Returns:
+            action: [batch, 2] (item_idx, bin_idx)
+            log_probs: [batch, 1] combined log probabilities
+            None: no hidden state (compatibility with Knapsack interface)
+        """
+        n_problems, problem_dim, n_features = state.shape
+        
+        # Extract features from state
+        # state format: [x, w, free_capacity, E, ΔE, T]
+        x = state[..., 0]  # [batch, problem_dim] - current bin assignments
+        weights = state[..., 1]  # [batch, problem_dim] - item weights
+        free_capacity = state[..., 2]  # [batch, problem_dim] - free capacity per bin
+        
+        # E, ΔE, T are constant across items in current timestep
+        if n_features >= 6:
+            E = state[..., 3]  # [batch, problem_dim] - current energy
+            delta_E = state[..., 4]  # [batch, problem_dim] - energy change
+            temp = state[..., 5]  # [batch, problem_dim] - temperature
+        elif n_features >= 5:
+            E = state[..., 3]  # [batch, problem_dim]
+            delta_E = torch.zeros_like(E)
+            temp = state[..., 4]
+        else:
+            # Fallback: no E, ΔE
+            E = torch.zeros(n_problems, problem_dim, device=state.device)
+            delta_E = torch.zeros_like(E)
+            temp = state[..., 3] if n_features >= 4 else torch.ones_like(E)
+
+        # === ITEM SELECTION ===
+        # Get free capacity of each item's current bin
+        fci = free_capacity.gather(1, x.long())
+        
+        # Build item state: [w_i, c_b(i), E, ΔE, T] for each item
+        item_state = torch.stack([weights, fci, E, delta_E, temp], dim=-1)
+        
+        # Get item logits through MLP
+        item_logits = self.embed_item(item_state)[..., 0]
+        
+        # Sample item
+        item, log_probs_item = self.sample_from_logits(item_logits, greedy=greedy)
+
+        # === BIN SELECTION ===
+        # Gather the weight of selected item
+        item_weight = weights.gather(1, item.view(-1, 1))
+        item_weight = item_weight.expand(-1, problem_dim)
+
+        # Build bin state: [w_i, c_j, E, ΔE, T] for each bin
+        bin_state = torch.stack([item_weight, free_capacity, E, delta_E, temp], dim=-1)
+
+        # Get bin mask - prevent oversized and same-bin moves
+        oversized = (item_weight - free_capacity) > 0
+        oversized = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        mask = torch.scatter(oversized, 1, item.unsqueeze(1), torch.finfo(torch.float32).min)
+
+        # Get bin logits through MLP
+        bin_logits = self.embed_bin(bin_state)[..., 0]  # [batch, problem_dim]
+
+        # Sample bin
+        bin, log_probs_bin = self.sample_from_logits(bin_logits, mask=mask, greedy=greedy)
+
+        # Build action tensor
+        action = torch.cat((item.view(-1, 1), bin.view(-1, 1)), dim=-1)
+
+        return action, log_probs_item + log_probs_bin, None
+
+    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Uniform random baseline policy."""
+        n_problems, problem_dim, _ = state.shape
+        
+        weights = state[..., 1]
+        free_capacity = state[..., 2]
+
+        # Sample item uniformly
+        item = torch.randint(0, problem_dim, (n_problems,), device=state.device, generator=self.generator)
+        item_weight = weights.gather(1, item.view(-1, 1)).expand(-1, problem_dim)
+
+        # Get bin mask
+        oversized = (item_weight - free_capacity) > 0
+        oversized = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        mask = torch.scatter(oversized, 1, item.unsqueeze(1), torch.finfo(torch.float32).min)
+
+        logits = torch.zeros(n_problems, problem_dim, device=state.device)
+        logits = logits + mask
+        probs = torch.softmax(logits, dim=-1)
+        bin = torch.multinomial(probs, 1, generator=self.generator).squeeze(1)
+
+        # Calculate log probabilities
+        log_prob_item = torch.log(torch.ones(n_problems, device=state.device) / problem_dim)
+        log_prob_bin = torch.log(probs.gather(1, bin.view(-1, 1))).squeeze(-1)
+
+        action = torch.cat((item.view(-1, 1), bin.view(-1, 1)), dim=-1)
+        return action, log_prob_item + log_prob_bin
+
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, hidden=None) -> torch.Tensor:
+        """
+        Evaluate log probability of given action under current policy.
+        
+        Args:
+            state: [batch, problem_dim, features]
+            action: [batch, 2] (item_idx, bin_idx)
+            hidden: Not used, kept for compatibility
+            
+        Returns:
+            log_probs: [batch] log probabilities of actions
+        """
+        n_problems, problem_dim, n_features = state.shape
+        
+        # Extract features
+        x = state[..., 0]
+        weights = state[..., 1]
+        free_capacity = state[..., 2]
+        
+        if n_features >= 6:
+            E = state[..., 3]
+            delta_E = state[..., 4]
+            temp = state[..., 5]
+        elif n_features >= 5:
+            E = state[..., 3]
+            delta_E = torch.zeros_like(E)
+            temp = state[..., 4]
+        else:
+            E = torch.zeros(n_problems, problem_dim, device=state.device)
+            delta_E = torch.zeros_like(E)
+            temp = state[..., 3] if n_features >= 4 else torch.ones_like(E)
+
+        item_idx = action[:, 0].long()
+        bin_idx = action[:, 1].long()
+
+        # === ITEM LOG PROB ===
+        fci = free_capacity.gather(1, x.long())
+        item_state = torch.stack([weights, fci, E, delta_E, temp], dim=-1)
+        
+        item_logits = self.embed_item(item_state)[..., 0]
+        item_log_probs = torch.log_softmax(item_logits, dim=-1)
+        log_probs_item = item_log_probs.gather(1, item_idx.view(-1, 1))
+
+        # === BIN LOG PROB ===
+        item_weight = weights.gather(1, item_idx.view(-1, 1)).expand(-1, problem_dim)
+        bin_state = torch.stack([item_weight, free_capacity, E, delta_E, temp], dim=-1)
+
+        # Mask
+        oversized = (item_weight - free_capacity) > 0
+        oversized = torch.where(oversized, torch.finfo(torch.float32).min, 0.0)
+        mask = torch.scatter(oversized, 1, item_idx.unsqueeze(1), torch.finfo(torch.float32).min)
+
+        bin_logits = self.embed_bin(bin_state)[..., 0]
+        bin_logits = bin_logits + mask
+        bin_log_probs = torch.log_softmax(bin_logits, dim=-1)
+        log_probs_bin = bin_log_probs.gather(1, bin_idx.view(-1, 1))
+
+        return (log_probs_item + log_probs_bin).squeeze(-1)
 
 
 class BinPackingCriticRLBSA(nn.Module):
-    """RLBSA critic for BinPacking - NOT YET IMPLEMENTED"""
-    def __init__(self, embed_dim: int, device: str = "cpu") -> None:
+    def __init__(self, problem, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
-        raise NotImplementedError("RLBSA for BinPacking is not yet implemented. Use BinPackingCriticNSA instead.")
+        self.device = device
+        self.problem = problem
+        self.embed_dim = embed_dim
+        
+        self.state_dim = 5
+
+        # MLP critic processes per-bin features (as in paper)
+        self.q_func = nn.Sequential(
+            nn.Linear(self.state_dim, embed_dim, device=device),
+            nn.LeakyReLU(),
+            nn.Linear(embed_dim, 1, device=device),
+        )
+
+        self.q_func.apply(self.init_weights)
+
+    @staticmethod
+    def init_weights(m: nn.Module) -> None:
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                m.bias.data.fill_(0.01)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            state: [batch, problem_dim, features] where features = [x, w, free_capacity, E, ΔE, T]
+            
+        Returns:
+            value: [batch] state value estimate
+        """
+        batch_size, problem_dim, n_features = state.shape
+        
+        if n_features >= 6:
+            # [w, free_capacity, E, ΔE, T]
+            features = state[..., 1:6]
+        elif n_features >= 5:
+            # [w, free_capacity, E/T, ΔE/0, T/0]
+            features = state[..., 1:5]
+            if features.shape[-1] < 5:
+                padding = torch.zeros(batch_size, problem_dim, 5 - features.shape[-1],
+                                     device=state.device)
+                features = torch.cat([features, padding], dim=-1)
+        else:
+            # Minimal features [w, free_capacity, T], pad to 5
+            features = state[..., 1:4]
+            padding = torch.zeros(batch_size, problem_dim, 5 - features.shape[-1],
+                                 device=state.device)
+            features = torch.cat([features, padding], dim=-1)
+        
+        # Process features through MLP and aggregate
+        q_values = self.q_func(features).view(batch_size, problem_dim)
+        return q_values.mean(dim=-1)
+
 
 
 # Backward compatibility - default to NSA

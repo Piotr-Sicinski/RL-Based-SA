@@ -116,8 +116,8 @@ def main(cfg: NeuralSAExperiment) -> None:
         problem = BinPacking(cfg.problem_dim, cfg.n_problems, device=cfg.device)
         
         if cfg.method_type == "rlbsa":
-            actor = BinPackingActorRLBSA(cfg.embed_dim, device=cfg.device)
-            critic = BinPackingCriticRLBSA(cfg.embed_dim, device=cfg.device)
+            actor = BinPackingActorRLBSA(problem, cfg.embed_dim, device=cfg.device)
+            critic = BinPackingCriticRLBSA(problem, cfg.embed_dim, device=cfg.device)
         elif cfg.method_type == "nsa":
             actor = BinPackingActorNSA(cfg.embed_dim, device=cfg.device)
             critic = BinPackingCriticNSA(cfg.embed_dim, device=cfg.device)
