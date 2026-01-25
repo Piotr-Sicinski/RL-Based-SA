@@ -108,7 +108,7 @@ def ppo(
             rewards_to_go[i, ...] = discounted_reward
             advantages[i, ...] = advantage
         # Normalize advantages
-        advantages = advantages - advantages.mean() / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     advantages = advantages.view(n_problems * nt, -1)
     rewards_to_go = rewards_to_go.view(n_problems * nt, -1)
 
@@ -155,6 +155,9 @@ def ppo(
                 # Optimize
                 actor_loss.backward()
                 critic_loss.backward()
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
                 actor_opt.step()
                 critic_opt.step()
     return actor_loss.item(), critic_loss.item()

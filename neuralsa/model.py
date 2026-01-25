@@ -1186,6 +1186,7 @@ class RosenbrockActorNSA(SAModel):
     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
         self.problem_dim = problem_dim
+        self.embed_dim = embed_dim
         # State: x (problem_dim) + a (1) + b (1) + temp (1) = problem_dim + 3
         state_dim = problem_dim + 3
         self.mu = torch.zeros(problem_dim, device=device)
@@ -1209,14 +1210,16 @@ class RosenbrockActorNSA(SAModel):
         if greedy:
             action = mu
         else:
-            action = mu + torch.exp(0.5 * log_var) * torch.randn(
+            std = torch.exp(0.5 * log_var)
+            action = mu + std * torch.randn(
                 (batch_size, self.problem_dim), device=state.device, generator=self.generator
             )
         
-        # Compute log probability
+        # Compute log probability with numerical stability
+        # log N(x; μ, σ²) = -0.5 * (log(2π) + log(σ²) + (x-μ)²/σ²)
+        var = torch.exp(log_var)
         log_prob = -0.5 * (
-            log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
-            torch.pow(action - mu, 2) / log_var.exp()
+            np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)
         )
         return action, log_prob.sum(dim=1)
 
@@ -1233,9 +1236,9 @@ class RosenbrockActorNSA(SAModel):
         batch_size = state.shape[0]
         mu = self.mu.repeat(batch_size, 1)
         log_var = self.log_var(state)
+        var = torch.exp(log_var)
         log_prob = -0.5 * (
-            log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
-            torch.pow(action - mu, 2) / log_var.exp()
+            np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)
         )
         return log_prob.sum(dim=1)
 
@@ -1266,23 +1269,216 @@ class RosenbrockCriticNSA(nn.Module):
         """
         return self.value_func(state).squeeze(-1)
 
+# ============================================================
+# ROSENBROCK - NSA (Original)
+# ============================================================
+
+# class RosenbrockActorNSA(SAModel):
+#     """NSA actor for Rosenbrock - Gaussian policy"""
+#     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+#         super().__init__(device)
+#         self.problem_dim = problem_dim
+#         # State: x (problem_dim) + a (1) + b (1) + temp (1) = problem_dim + 3
+#         state_dim = problem_dim + 3
+#         self.mu = torch.zeros(problem_dim, device=device)
+#         self.log_var = nn.Sequential(
+#             nn.Linear(state_dim, embed_dim, device=device),
+#             nn.ReLU(),
+#             nn.Linear(embed_dim, problem_dim, device=device),
+#             nn.Hardtanh(min_val=-6, max_val=2.0),
+#         )
+#         self.log_var.apply(self.init_weights)
+
+#     def sample(self, state: torch.Tensor, greedy: bool = False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+#         """
+#         state: [batch, problem_dim + 3] where last 3 are (a, b, temp)
+#         returns: action [batch, problem_dim], log_probs [batch]
+#         """
+#         batch_size = state.shape[0]
+#         mu = self.mu.repeat(batch_size, 1)
+#         log_var = self.log_var(state)
+        
+#         if greedy:
+#             action = mu
+#         else:
+#             action = mu + torch.exp(0.5 * log_var) * torch.randn(
+#                 (batch_size, self.problem_dim), device=state.device, generator=self.generator
+#             )
+        
+#         # Compute log probability
+#         log_prob = -0.5 * (
+#             log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
+#             torch.pow(action - mu, 2) / log_var.exp()
+#         )
+#         return action, log_prob.sum(dim=1)
+
+#     def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+#         """Random Gaussian action"""
+#         batch_size = state.shape[0]
+#         action = torch.randn((batch_size, self.problem_dim), device=state.device, generator=self.generator)
+#         # Uniform log prob (not exact, but for baseline)
+#         log_probs = torch.zeros(batch_size, device=state.device)
+#         return action, log_probs
+
+#     def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
+#         """Evaluate log prob of action given state"""
+#         batch_size = state.shape[0]
+#         mu = self.mu.repeat(batch_size, 1)
+#         log_var = self.log_var(state)
+#         log_prob = -0.5 * (
+#             log_var + torch.log(torch.tensor(2 * np.pi, device=state.device)) + 
+#             torch.pow(action - mu, 2) / log_var.exp()
+#         )
+#         return log_prob.sum(dim=1)
+
+
+# class RosenbrockCriticNSA(nn.Module):
+#     """NSA critic for Rosenbrock"""
+#     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
+#         super().__init__()
+#         state_dim = problem_dim + 3  # x + a + b + temp
+#         self.value_func = nn.Sequential(
+#             nn.Linear(state_dim, embed_dim, device=device),
+#             nn.ReLU(),
+#             nn.Linear(embed_dim, 1, device=device),
+#         )
+#         self.value_func.apply(self.init_weights)
+
+#     @staticmethod
+#     def init_weights(m: nn.Module) -> None:
+#         if type(m) == nn.Linear:
+#             nn.init.xavier_uniform_(m.weight)
+#             if m.bias is not None:
+#                 m.bias.data.fill_(0.01)
+
+#     def forward(self, state: torch.Tensor) -> torch.Tensor:
+#         """
+#         state: [batch, problem_dim + 3]
+#         returns: value [batch]
+#         """
+#         return self.value_func(state).squeeze(-1)
+
 
 # ============================================================
-# ROSENBROCK - RLBSA (Not yet implemented)
+# ROSENBROCK - RLBSA (RL-Based SA with extended state features)
 # ============================================================
 
 class RosenbrockActorRLBSA(SAModel):
-    """RLBSA actor for Rosenbrock - NOT YET IMPLEMENTED"""
+    """RLBSA actor for Rosenbrock with extended state features (E, ΔE)
+    
+    According to paper section 4.2, the key innovation for continuous problems is
+    adding current energy E and energy change ΔE to the state:
+    S_t = (x_t, E_t, ΔE_t, T_t)
+    
+    For 2D Rosenbrock with problem parameters (a, b):
+    Full state: [x(2), a(1), b(1), E(1), ΔE(1), T(1)] = 7 features
+    
+    Architecture: 2-layer MLP (7 → 16 → 16 → 2) as per paper Section 4.1.1
+    Output: log variance for Gaussian action distribution (mean fixed at 0)
+    
+    Note: We use MLP instead of LSTM because PPO training shuffles data,
+    which breaks LSTM's temporal dependencies. The state features (E, ΔE)
+    already encode the relevant history.
+    """
     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
         super().__init__(device)
-        raise NotImplementedError("RLBSA for Rosenbrock is not yet implemented. Use RosenbrockActorNSA instead.")
+        self.problem_dim = problem_dim
+        self.embed_dim = embed_dim
+        
+        # Full state: x(dim) + a(1) + b(1) + E(1) + ΔE(1) + T(1) = dim + 5
+        # For 2D: 7 features
+        state_dim = problem_dim + 5
+        
+        # Mean fixed at zero (perturbation-based actions)
+        self.mu = torch.zeros(problem_dim, device=device)
+        
+        # 2-layer MLP: state_dim → embed_dim → embed_dim → problem_dim
+        # Paper says 7 → 16 → 16 → 2 for 2D continuous problems
+        self.log_var = nn.Sequential(
+            nn.Linear(state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, problem_dim, device=device),
+            nn.Hardtanh(min_val=-6, max_val=2.0),  # Constrain log variance
+        )
+        self.log_var.apply(self.init_weights)
+
+    def sample(self, state: torch.Tensor, greedy: bool = False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        state: [batch, problem_dim + 5] where format is [x, a, b, E, ΔE, T]
+        returns: action [batch, problem_dim], log_probs [batch]
+        """
+        batch_size = state.shape[0]
+        mu = self.mu.repeat(batch_size, 1)
+        log_var = self.log_var(state)
+        
+        if greedy:
+            action = mu
+        else:
+            std = torch.exp(0.5 * log_var)
+            action = mu + std * torch.randn(
+                (batch_size, self.problem_dim), device=state.device, generator=self.generator
+            )
+        
+        # Compute log probability with numerical stability
+        var = torch.exp(log_var)
+        log_prob = -0.5 * (
+            np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)
+        )
+        return action, log_prob.sum(dim=1)
+
+    def baseline_sample(self, state: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Random Gaussian action"""
+        batch_size = state.shape[0]
+        action = torch.randn((batch_size, self.problem_dim), device=state.device, generator=self.generator)
+        log_probs = torch.zeros(batch_size, device=state.device)
+        return action, log_probs
+
+    def evaluate(self, state: torch.Tensor, action: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Evaluate log prob of action given state"""
+        batch_size = state.shape[0]
+        mu = self.mu.repeat(batch_size, 1)
+        log_var = self.log_var(state)
+        var = torch.exp(log_var)
+        log_prob = -0.5 * (
+            np.log(2 * np.pi) + log_var + torch.pow(action - mu, 2) / (var + 1e-8)
+        )
+        return log_prob.sum(dim=1)
 
 
 class RosenbrockCriticRLBSA(nn.Module):
-    """RLBSA critic for Rosenbrock - NOT YET IMPLEMENTED"""
+    """RLBSA critic for Rosenbrock with extended state features (E, ΔE)
+    
+    Full state: [x(dim), a, b, E, ΔE, T] = dim + 5 features
+    Architecture: 2-layer MLP matching actor
+    """
     def __init__(self, problem_dim: int, embed_dim: int, device: str = "cpu") -> None:
         super().__init__()
-        raise NotImplementedError("RLBSA for Rosenbrock is not yet implemented. Use RosenbrockCriticNSA instead.")
+        state_dim = problem_dim + 5  # x + a + b + E + ΔE + T
+        
+        self.value_func = nn.Sequential(
+            nn.Linear(state_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1, device=device),
+        )
+        self.value_func.apply(self.init_weights)
+
+    @staticmethod
+    def init_weights(m: nn.Module) -> None:
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                m.bias.data.fill_(0.01)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        state: [batch, problem_dim + 5]
+        returns: value [batch]
+        """
+        return self.value_func(state).squeeze(-1)
 
 
 # Backward compatibility - default to NSA

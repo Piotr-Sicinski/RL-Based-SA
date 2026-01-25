@@ -103,16 +103,25 @@ class Rosenbrock(Problem):
         x = torch.randn(self.n_problems, self.dim, device=self.device, generator=self.generator)
         return torch.cat([x, self.state_encoding], -1)
 
-    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None) -> torch.Tensor:
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, delta_e: torch.Tensor = None,
+                 current_energy: torch.Tensor = None) -> torch.Tensor:
         """Construct state for Rosenbrock (flat vector structure)
+        
+        According to paper (line 806), the state format for continuous functions should be:
+        - NSA: [x, a, b, T] - dim + 3 features (2D: 5 features)
+        - RLBSA: [x, a, b, E, ΔE, T] - dim + 5 features (2D: 7 features)
+        
+        Note: Current energy E and ΔE are both included for RLBSA.
+        For continuous: E comes before ΔE, then T at end.
         
         Args:
             x: [batch, dim] - current solution
             temp: [batch, 1] or scalar - temperature
-            delta_e: [batch, 1] or None - energy change (for RLBSA)
+            delta_e: [batch, 1] or None - energy change ΔE (for RLBSA)
+            current_energy: [batch, 1] or None - current energy E (for RLBSA)
             
         Returns:
-            state: [batch, dim + 2 + 1 + (1 if delta_e)] - flat state vector
+            state: [batch, dim + features]
         """
         # x: [batch, dim], state_encoding: [batch, 2], temp: [batch, 1]
         if temp.dim() == 0 or (temp.dim() == 1 and temp.shape[0] == 1):
@@ -122,20 +131,32 @@ class Rosenbrock(Problem):
             # [batch] -> [batch, 1]
             temp = temp.unsqueeze(-1)
         
-        state = torch.cat([x, self.state_encoding, temp], -1)
+        # Base state: [x, a, b] - always present
+        state = torch.cat([x, self.state_encoding], -1)
         
-        if delta_e is not None:
+        # For RLBSA: add E and ΔE before temperature
+        # Order: [x(dim), a(1), b(1), E(1), ΔE(1), T(1)]
+        if current_energy is not None and delta_e is not None:
+            if current_energy.dim() == 1:
+                current_energy = current_energy.unsqueeze(-1)
             if delta_e.dim() == 1:
                 delta_e = delta_e.unsqueeze(-1)
-            state = torch.cat([state, delta_e], -1)
+            state = torch.cat([state, current_energy, delta_e], -1)
+        
+        # Add temperature at the end
+        state = torch.cat([state, temp], -1)
         
         return state
 
     def from_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Extract x, spec, temp from state (ignoring ΔE if present)
+        """Extract x, spec, temp from state (ignoring E and ΔE if present)
+        
+        State can be in two formats:
+        - NSA: [x(dim), a, b, T] - dim + 3 features (2D: 5)
+        - RLBSA: [x(dim), a, b, E, ΔE, T] - dim + 5 features (2D: 7)
         
         Args:
-            state: [batch, dim + 2 + 1 + (1 if delta_e)]
+            state: [batch, features] where features is dim+3 or dim+4
             
         Returns:
             x: [batch, dim]
@@ -144,7 +165,8 @@ class Rosenbrock(Problem):
         """
         x = state[..., :self.dim]
         spec = state[..., self.dim:self.dim + 2]
-        temp = state[..., self.dim + 2:self.dim + 3]
+        # Temperature is always at the end
+        temp = state[..., -1:]
         return x, spec, temp
 
     def cost(self, s: torch.Tensor) -> torch.Tensor:

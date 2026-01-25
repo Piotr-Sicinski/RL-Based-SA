@@ -53,18 +53,21 @@ def sa(
     reward = None
 
     # ============================================================
-    # LSTM hidden state (INIT ONCE PER ROLLOUT)
-    # Determine if we're using RLBSA (has LSTM) or NSA (no LSTM)
+    # Determine if we're using RLBSA (uses E, ΔE) or NSA (doesn't)
     # ============================================================
+    # RLBSA models have 'RLBSA' in their class name
+    use_rlbsa = 'RLBSA' in actor.__class__.__name__
+    use_delta_e = use_rlbsa  # RLBSA uses delta_e and current_energy, NSA doesn't
+    
+    # Check if actor has LSTM (for recurrent hidden state management)
     use_lstm = hasattr(actor, "lstm")
-    use_delta_e = use_lstm  # RLBSA uses delta_e, NSA doesn't
-
     if use_lstm:
-        B = init_x.shape[0]          # batch size
+        B = init_x.shape[0]
         H = actor.embed_dim
+        num_layers = actor.lstm.num_layers
         hidden_actor = (
-            torch.zeros(1, B, H, device=device),
-            torch.zeros(1, B, H, device=device),
+            torch.zeros(num_layers, B, H, device=device),
+            torch.zeros(num_layers, B, H, device=device),
         )
     else:
         hidden_actor = None
@@ -129,14 +132,7 @@ def sa(
             # Energy difference
             # ----------------------------------------------------
             proposal_cost = problem.cost(proposal)
-            gain = cost - proposal_cost   # = -ΔE
-            
-            # Compute ΔE for next state: E(proposal) - E(current)
-            # This is what RL-Based SA adds to the state (only for RLBSA)
-            if use_delta_e:
-                current_delta_e = (proposal_cost - cost).unsqueeze(-1)
-            else:
-                current_delta_e = None
+            gain = cost - proposal_cost   # = -ΔE (positive gain = good move)
 
             # ----------------------------------------------------
             # Metropolis acceptance
@@ -154,6 +150,7 @@ def sa(
             # ----------------------------------------------------
             # State & cost update
             # ----------------------------------------------------
+            prev_cost = cost  # Save for ΔE calculation
             cost = accept * proposal_cost + (1 - accept) * cost
             accept_x = extend_to(accept, x)
             next_x = accept_x * proposal + (1 - accept_x) * x
@@ -184,12 +181,14 @@ def sa(
             # ----------------------------------------------------
             if use_delta_e:
                 # For RLBSA: state includes current energy E and delta E
-                # State format: [x, w, v, W, E, ΔE, T] (7 features)
+                # State format: [x, a, b, E, ΔE, T] (7 features for 2D Rosenbrock)
+                # 
+                # IMPORTANT: ΔE should be the ACTUAL energy change after acceptance,
+                # not the proposed energy change. If move was rejected, ΔE = 0.
+                actual_delta_e = (accept * (proposal_cost - prev_cost)).unsqueeze(-1)
                 current_energy = cost.unsqueeze(-1)  # [batch, 1]
-                next_state = problem.to_state(next_x, next_temp, delta_e=current_delta_e, 
+                next_state = problem.to_state(next_x, next_temp, delta_e=actual_delta_e, 
                                               current_energy=current_energy)
-                # Update delta_e for next iteration
-                delta_e = current_delta_e
             else:
                 next_state = problem.to_state(next_x, next_temp)
 

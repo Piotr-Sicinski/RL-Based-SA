@@ -156,12 +156,18 @@ def evaluate_config(args):
     try:
         print(f"[Worker {worker_id}] Starting: {problem_name} dim={problem_dim} K={K} method={method_type} device={device}")
         
+        # For baseline, use NSA actor but set baseline=True
+        actor_type = "nsa" if method_type == "baseline" else method_type
+        
         # Create actor and problem
-        actor, problem = create_actor_and_problem(problem_name, method_type, problem_dim, device, embed_dim)
+        actor, problem = create_actor_and_problem(problem_name, actor_type, problem_dim, device, embed_dim)
         
         # Load model weights
         actor.load_state_dict(torch.load(model_path, map_location=device))
         actor.eval()
+        
+        # Determine evaluation mode
+        baseline_mode = (method_type == "baseline")
         
         # Run evaluations
         results = []
@@ -170,7 +176,7 @@ def evaluate_config(args):
         for seed in range(1, n_runs + 1):
             cost, elapsed = run_single_evaluation(
                 actor, problem, problem_dim, K, init_temp, stop_temp, device,
-                baseline=False, greedy=False, seed=seed
+                baseline=baseline_mode, greedy=False, seed=seed
             )
             results.append(cost)
             times.append(elapsed)
@@ -238,6 +244,16 @@ def main(cfg):
         
         for problem_dim in problem_sizes:
             for K in K_values:
+                # Baseline task (uses NSA model with baseline=True)
+                if nsa_model:
+                    nsa_model_path = get_model_path(project_root, nsa_model)
+                    device = devices[worker_id % len(devices)]
+                    tasks.append((
+                        problem_name, problem_dim, K, "baseline", nsa_model_path,
+                        init_temp, stop_temp, device, worker_id, n_runs, embed_dim
+                    ))
+                    worker_id += 1
+                
                 # NSA task
                 if nsa_model:
                     nsa_model_path = get_model_path(project_root, nsa_model)
@@ -305,7 +321,8 @@ def main(cfg):
             for K in K_values:
                 key = f"{problem_name}_{size}_K{K}"
                 if key in organized_results:
-                    for method in ["nsa", "rlbsa"]:
+                    # Print in order: baseline, nsa, rlbsa
+                    for method in ["baseline", "nsa", "rlbsa"]:
                         if method in organized_results[key]:
                             r = organized_results[key][method]
                             print(f"{size:<10} {K:<10} {method:<10} {r['min']:<12.4f} {r['avg']:<12.4f} "
