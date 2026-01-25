@@ -72,7 +72,7 @@ def create_actor_and_problem(problem_name: str, method_type: str, problem_dim: i
         problem = BinPacking(problem_dim, n_problems=1, device=device)
         
         if method_type == "rlbsa":
-            actor = BinPackingActorRLBSA(embed_dim, device=device)
+            actor = BinPackingActorRLBSA(problem, embed_dim, device=device)
         else:  # nsa
             actor = BinPackingActorNSA(embed_dim, device=device)
             

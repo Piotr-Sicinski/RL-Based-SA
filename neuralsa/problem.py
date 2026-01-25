@@ -379,8 +379,8 @@ class BinPacking(Problem):
         x = self.generate_init_x()
         return torch.cat([x, self.state_encoding], -1)
 
-    def to_state(self, x: torch.Tensor, temp: torch.Tensor, energy: torch.Tensor = None, 
-                 delta_energy: torch.Tensor = None) -> torch.Tensor:
+    def to_state(self, x: torch.Tensor, temp: torch.Tensor, current_energy: torch.Tensor = None, 
+                 delta_e: torch.Tensor = None) -> torch.Tensor:
         """Convert solution x to full state representation.
         
         According to RL-Based-SA paper (Section 3.5):
@@ -397,6 +397,8 @@ class BinPacking(Problem):
             [bin_assignment, weight, free_capacity, E, ΔE, T]
         """
         batch_size, problem_dim, _ = x.shape
+        delta_energy = delta_e  # for generalization
+        energy = current_energy # for generalization
         
         def normalize_to_batch(tensor, default_val=0.0):
             if tensor is None:

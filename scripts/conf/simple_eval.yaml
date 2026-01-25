@@ -1,11 +1,11 @@
 # Simple evaluation configuration
 
 experiments:
-  knapsack:
-    problem_sizes: [50, 100, 200, 500]
-    K: [1, 2, 5]
-    nsa: knapsack50-nsa-ppo
-    rlbsa: knapsack50-rlbsa-ppo
+  # knapsack:
+  #   problem_sizes: [50, 100, 200, 500]
+  #   K: [1, 2, 5]
+  #   nsa: knapsack50-nsa-ppo
+  #   rlbsa: knapsack50-rlbsa-ppo
   
   # rosenbrock:
   #   problem_sizes: [2]
@@ -13,13 +13,19 @@ experiments:
   #   nsa: rosenbrock2-nsa-ppo
   #   rlbsa: rosenbrock2-rlbsa-ppo
 
+  binpacking:
+    problem_sizes: [50, 100, 200, 500]
+    K: [1, 2, 5]
+    nsa: binpacking50-nsa-ppo
+    rlbsa: binpacking50-ppo
+
 # Number of parallel workers
 num_workers: 8
 
 # Devices to distribute work across
 devices:
   - cuda:0
-  - cuda:1
+  # - cuda:1
 
 # Number of evaluation runs per configuration
 n_runs: 5
